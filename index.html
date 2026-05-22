@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gravity Simulator</title>
+<meta name="description" content="Interactive N-body gravity simulation with orbiting planets and real-time controls">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+MathJax = {
+  tex: { inlineMath: [['$','$']] },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Inter',sans-serif;background:#0a0a1a;color:#e0e0e0}
+#app{display:flex;width:100%;height:100%}
+#canvas-area{flex:1;display:flex;flex-direction:column;min-width:0}
+canvas#sim{flex:1;display:block;cursor:crosshair;min-height:0}
+
+/* ===== Control Panel ===== */
+#panel{width:340px;min-width:340px;height:100%;overflow-y:auto;background:linear-gradient(160deg,rgba(15,15,35,0.92),rgba(10,10,26,0.96));border-left:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);padding:0;display:flex;flex-direction:column}
+#panel::-webkit-scrollbar{width:6px}
+#panel::-webkit-scrollbar-track{background:transparent}
+#panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:3px}
+
+.panel-header{padding:24px 20px 16px;border-bottom:1px solid rgba(255,255,255,0.06)}
+.panel-header h1{font-size:1.35em;font-weight:800;letter-spacing:-0.5px;background:linear-gradient(135deg,#ffd475,#ff8a50);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.panel-header p{font-size:0.78em;color:#666;margin-top:4px;letter-spacing:0.3px}
+
+.panel-content{flex:1;overflow-y:auto;padding:12px 20px 20px}
+.panel-content::-webkit-scrollbar{width:5px}
+.panel-content::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:3px}
+
+/* Section */
+.section{margin-bottom:16px}
+.section-title{font-size:0.72em;text-transform:uppercase;letter-spacing:1.5px;color:#555;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.section-title::after{content:'';flex:1;height:1px;background:rgba(255,255,255,0.06)}
+
+/* Body card */
+.body-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin-bottom:8px;transition:all 0.2s ease}
+.body-card:hover{background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1)}
+.body-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.body-name{display:flex;align-items:center;gap:8px;font-weight:600;font-size:0.92em}
+.body-dot{width:10px;height:10px;border-radius:50%;box-shadow:0 0 8px currentColor}
+.remove-btn{background:none;border:1px solid rgba(255,80,80,0.2);color:#ff5555;width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:0.8em;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.remove-btn:hover{background:rgba(255,80,80,0.15);border-color:rgba(255,80,80,0.4);transform:scale(1.1)}
+.lock-btn{background:none;border:1px solid rgba(255,200,100,0.2);color:#ffb347;width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:0.7em;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.lock-btn:hover{background:rgba(255,200,100,0.15);border-color:rgba(255,200,100,0.4);transform:scale(1.1)}
+.lock-btn.locked{background:rgba(255,200,100,0.22);border-color:rgba(255,200,100,0.5);color:#ffd47a}
+.orbit-btn{background:none;border:1px solid rgba(125,211,252,0.25);color:#7dd3fc;width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:0.78em;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.orbit-btn:hover{background:rgba(125,211,252,0.18);border-color:rgba(125,211,252,0.45);transform:scale(1.1)}
+.moon-btn{background:none;border:1px solid rgba(200,200,210,0.22);color:#cfd2d6;width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:0.72em;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.moon-btn:hover{background:rgba(200,200,210,0.16);border-color:rgba(200,200,210,0.45);transform:scale(1.1)}
+.card-actions{display:flex;gap:4px;align-items:center}
+
+/* Slider group */
+.slider-group{margin-bottom:8px}
+.slider-label{display:flex;justify-content:space-between;align-items:center;font-size:0.75em;color:#888;margin-bottom:4px}
+.slider-value{color:#bbb;font-weight:500;font-variant-numeric:tabular-nums}
+input[type="range"]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;background:rgba(255,255,255,0.08);outline:none;cursor:pointer;transition:background 0.2s}
+input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(255,255,255,0.3);cursor:pointer;transition:transform 0.15s,box-shadow 0.15s}
+input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.2);box-shadow:0 0 10px rgba(255,255,255,0.5)}
+input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(255,255,255,0.3);cursor:pointer;border:none}
+
+/* Buttons */
+.btn-row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.btn{padding:8px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#ccc;font-family:'Inter',sans-serif;font-size:0.8em;font-weight:500;cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:5px}
+.btn:hover{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.18);color:#fff;transform:translateY(-1px)}
+.btn.active{background:rgba(100,200,255,0.12);border-color:rgba(100,200,255,0.3);color:#7dd3fc}
+.btn.add-btn{background:rgba(80,220,120,0.08);border-color:rgba(80,220,120,0.2);color:#6ee7a0}
+.btn.add-btn:hover{background:rgba(80,220,120,0.15);border-color:rgba(80,220,120,0.35)}
+.btn.reset-btn{background:rgba(255,100,100,0.08);border-color:rgba(255,100,100,0.2);color:#ff8888}
+.btn.reset-btn:hover{background:rgba(255,100,100,0.15);border-color:rgba(255,100,100,0.35)}
+
+/* Status bar */
+.status-bar{padding:12px 20px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;font-size:0.7em;color:#555;font-variant-numeric:tabular-nums}
+
+/* Merge flash overlay */
+.merge-flash{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(255,220,150,0.06);pointer-events:none;opacity:0;transition:opacity 0.15s}
+.merge-flash.active{opacity:1}
+
+/* Equation bar */
+#equation-bar{min-height:80px;background:linear-gradient(90deg,rgba(12,12,30,0.96),rgba(18,18,40,0.96));border-top:1px solid rgba(255,255,255,0.06);display:flex;flex-direction:column;justify-content:center;padding:8px 24px;font-family:'Inter',sans-serif}
+#eq-row{display:flex;align-items:center;justify-content:center;gap:28px}
+#eq-legend{text-align:center;font-size:0.72em;color:#555;letter-spacing:0.3px;margin-top:4px}
+#eq-generic{color:#a78bfa}
+#eq-values{color:#bbb;transition:opacity 0.3s}
+.eq-label{font-size:0.7em;text-transform:uppercase;letter-spacing:1.2px;color:#444;margin-right:8px;font-weight:600}
+#body-select-a, #body-select-b{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:4px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none;cursor:pointer;min-width:110px}
+#body-select-a:hover, #body-select-b:hover{border-color:rgba(255,255,255,0.25)}
+#body-select-a option, #body-select-b option{background:#14142d;color:#ccc}
+
+/* Responsive */
+@media(max-width:768px){
+  #app{flex-direction:column}
+  #panel{width:100%;min-width:unset;height:45%;border-left:none;border-top:1px solid rgba(255,255,255,0.06)}
+  #canvas-area{height:55%}
+  #equation-bar{min-height:70px;gap:12px;font-size:0.78em;padding:6px 12px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="canvas-area">
+    <canvas id="sim"></canvas>
+    <div id="equation-bar">
+      <div id="eq-row">
+        <div id="eq-generic">$F = G \dfrac{m_1 \cdot m_2}{r^2}$</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="body-select-a" onchange="onBodySelectA(this.value)"><option value="">Body A…</option></select>
+          <span style="color:#555;font-size:0.85em">vs</span>
+          <select id="body-select-b" onchange="onBodySelectB(this.value)"><option value="">Body B…</option></select>
+          <div id="eq-values" style="opacity:0.4;color:#555;margin-left:4px">Select two bodies to see values</div>
+        </div>
+      </div>
+      <div id="eq-legend"><span style="color:#a78bfa">F</span> = gravitational force &nbsp;&middot;&nbsp; <span style="color:#a78bfa">G</span> = 0.5 (sim units; real value 6.674 &times; 10<sup>&minus;11</sup> N&middot;m&sup2;/kg&sup2;) &nbsp;&middot;&nbsp; <span style="color:#a78bfa">m&#x2081;, m&#x2082;</span> = masses of two bodies &nbsp;&middot;&nbsp; <span style="color:#a78bfa">r</span> = distance between them</div>
+    </div>
+  </div>
+  <div id="panel">
+    <div class="panel-header">
+      <h1>&#x2604; Gravity Simulator</h1>
+      <p>N-body gravitational simulation</p>
+    </div>
+    <div class="panel-content">
+      <div class="section">
+        <div class="section-title">Simulation</div>
+        <div class="btn-row">
+          <button class="btn" id="btn-pause" onclick="togglePause()" title="Pause or resume the simulation. Physics, stellar evolution, and animations all freeze while paused.">⏸ Pause</button>
+          <button class="btn reset-btn" id="btn-reset" onclick="resetSim()" title="Wipe everything and start fresh with the default sun + planets. You'll lose any unsaved bodies, galaxies, and admin-spawned objects.">↺ Reset</button>
+          <button class="btn" id="btn-trails" onclick="toggleTrails()" title="Show or hide the colored motion trails behind each body. Useful for visualizing orbits; turn off for cleaner snapshots.">◌ Trails</button>
+          <button class="btn" id="btn-vectors" onclick="toggleVectors()" title="Show velocity arrows on every body. Drag an arrow tip to change a body's speed and direction.">➤ Vectors</button>
+          <button class="btn active" id="btn-afterlife" onclick="toggleStarAfterlife()" title="Toggle stellar evolution. When on, stars age, become red giants / supernovae / black holes, etc. When off, stars stay frozen on the main sequence forever.">☠ Afterlife</button>
+          <button class="btn" id="btn-faces" onclick="toggleFaces()" title="Show or hide cartoon faces on every star, planet, and moon. Mood depends on the body's evolutionary state.">☺ Faces</button>
+          <button class="btn" id="btn-recenter" onclick="recenterView()" title="Snap the camera back to follow the primary sun and reset zoom to 1×. Use this if you panned/zoomed and lost the scene.">⌖ Recenter</button>
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Speed</span><span class="slider-value" id="speed-val">1.00×</span></div>
+          <input type="range" id="speed-slider" min="-0.6" max="4" step="0.01" value="0" oninput="setSpeedLog(this.value)" title="Time multiplier. Left = slow motion (0.25×), right = fast-forward up to 10,000×. Higher speeds age stars dramatically faster.">
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Suns</div>
+        <div class="btn-row">
+          <button class="btn add-btn" onclick="addSun()" style="background:rgba(255,180,70,0.08);border-color:rgba(255,180,70,0.2);color:#ffb347" title="Spawn a new main-sequence star near the camera. Adjust its mass with the slider that appears below — different masses give different spectral types (M, K, G, F, A, B, O) and lifespans.">☀ Add Sun</button>
+        </div>
+        <div id="sun-controls"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Planets</div>
+        <div class="btn-row">
+          <button class="btn add-btn" onclick="addPlanet()" title="Spawn a planet orbiting a nearby sun. Mass 0.1–50 = planet, 50–79 = dwarf star. Merge enough dwarf stars together (>79) and a real star ignites.">+ Add Planet</button>
+          <button class="btn add-btn" onclick="addMoon()" title="Spawn a small moon around a nearby planet. Moons inherit their parent's orbit and add a second tier of gravitational interaction.">🌑 Add Moon</button>
+        </div>
+        <div id="planet-controls"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Creator</div>
+        <div style="font-size:0.7em;color:#777;margin-bottom:10px;line-height:1.5">Design a custom body with full control over its type, mass, and color.</div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Type</span></div>
+          <select id="creator-type" onchange="onCreatorTypeChange()" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none;cursor:pointer">
+            <option value="sun">☀ Sun (main sequence)</option>
+            <option value="redgiant">🔴 Red Giant</option>
+            <option value="planet">🪐 Planet</option>
+            <option value="moon">🌑 Moon</option>
+            <option value="dwarf">◐ Dwarf Star</option>
+            <option value="blackhole">🕳️ Black Hole</option>
+            <option value="neutron">💫 Neutron Star</option>
+          </select>
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Name</span></div>
+          <input id="creator-name" type="text" placeholder="Auto" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none" />
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Mass</span><span class="slider-value" id="creator-mass-val">1000</span></div>
+          <input id="creator-mass" type="range" min="0" max="14" step="0.01" value="3" oninput="onCreatorMassInput(this.value)" />
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Color</span></div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input id="creator-color" type="color" value="#ffb347" style="width:40px;height:28px;border:none;border-radius:6px;cursor:pointer;background:transparent" />
+            <span id="creator-color-label" style="color:#aaa;font-size:0.75em;font-family:monospace">#ffb347</span>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn add-btn" onclick="createCustomBody()" style="flex:1" title="Spawn a body using the type, name, mass, and color set above.">✦ Create</button>
+        </div>
+      </div>
+
+      <div class="section" id="save-section">
+        <div class="section-title">Universes</div>
+        <div id="save-content"></div>
+      </div>
+
+      <div class="section" id="admin-section">
+        <div class="section-title">Admin</div>
+        <div id="admin-content"></div>
+      </div>
+    </div>
+    <div class="status-bar">
+      <span id="status-bodies">Bodies: 6</span>
+      <span id="status-fps">FPS: 60</span>
+    </div>
+  </div>
+</div>
+<div class="merge-flash" id="merge-flash"></div>
+
+<script src="gravity.js"></script>
+</body>
+</html>
