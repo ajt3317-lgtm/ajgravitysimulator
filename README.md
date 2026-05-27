@@ -2,7 +2,7 @@
 
 An interactive N-body gravity simulation with orbiting planets, stellar evolution, and real-time controls.
 
-**Live site:** https://ajgravitysimulator.netlify.app/ _(Netlify; will be re-deployed via Cloudflare Pages from this repo)_
+**Live site:** https://ajgravitysimulator.ajt3317.workers.dev/
 
 ## What's in here
 

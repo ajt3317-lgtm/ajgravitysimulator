@@ -6,9 +6,19 @@ const canvas = document.getElementById('sim');
 const ctx = canvas.getContext('2d');
 
 // ---- Constants ----
-const G_BASE = 0.5;
+// G_BASE is tuned below (after the AU/Sun constants) so Earth at 1 AU around
+// the Sun (mass 1000) completes one orbit in exactly 1 sim year (= 12 sim
+// months = 720 physics-dt units at 1× speed). All other planets get real-world
+// orbital periods automatically via Kepler's third law since their distances
+// are real AU multiples. Declared with `let` because the value is computed
+// once at startup from those constants.
+let G_BASE = 0.5;
 const SOFTENING = 4;
-const TRAIL_LEN = 120;
+// Trail length in physics-step samples. Earth at 1 AU records ~1440 samples per
+// orbit (720 physics-dt × 2 steps/dt) so 10000 covers ~7 full Earth orbits at
+// any time-warp setting (trail fill rate scales with speed, so it doesn't change
+// what fraction of an orbit is visible).
+const TRAIL_LEN = 10000;
 const STAR_COUNT = 160;
 // Rendering resolution cap. Many displays advertise DPR 2-3, which means the
 // canvas internally rasterizes 4-9× as many pixels per frame. Capping at 1.5
@@ -50,14 +60,50 @@ const PALETTE = [
 
 // ---- Named supermassive black holes ----
 // Used both at spawn-time (Add Sun modal) and at rename-time.
+// Sgr A* is sized so its event-horizon disc matches the realistic solar system
+// (Pluto's orbital radius = 39.48 AU). Every other named black hole below is
+// expressed as a multiple of Sgr A so the original size ratios are preserved.
+const _AU_IN_EARTH_DIAMETERS = 11727.399231907132727670392677483;
+const _EARTH_RADIUS_BASE = 3 + Math.cbrt(3) * 2.2;
+const _EARTH_DIAMETER_BASE = _EARTH_RADIUS_BASE * 2;
+const _AU_SIM_UNITS = _AU_IN_EARTH_DIAMETERS * _EARTH_DIAMETER_BASE;
+const SGR_A_RADIUS = 39.48 * _AU_SIM_UNITS; // ≈ 5.72 million sim units
 const NAMED_BHS = {
-  'sagittarius a': { mass: 1e15,   radius: 320                     },
-  'ton 618':       { mass: 6.6e13, radius: 320 * 27000             },
+  'sagittarius a': { mass: 1e15,   radius: SGR_A_RADIUS                 },
+  'ton 618':       { mass: 6.6e13, radius: SGR_A_RADIUS * 27000         },
   // Phoenix A: Sgr A mass, 51 11/39 % bigger than TON 618 (= ×59/39)
-  'phoenix a':     { mass: 1e15,   radius: 320 * 27000 * 59 / 39   },
+  'phoenix a':     { mass: 1e15,   radius: SGR_A_RADIUS * 27000 * 59/39 },
   // M31* — Andromeda's central black hole; 25× Sagittarius A's radius.
   // Mass scales with the real M31*/Sgr A solar-mass ratio (~35×).
-  'm31*':          { mass: 3.5e16, radius: 320 * 25                }
+  'm31*':          { mass: 3.5e16, radius: SGR_A_RADIUS * 25            }
+};
+
+// ---- Orbital tuning ----
+// We want Earth (at 1 AU around the Sun = 1000 sim mass) to complete one orbit
+// in exactly 1 sim year. 1 sim year = 12 sim months. At 1× speed each real
+// second yields 60 physics-dt units AND 1 sim month of simTime, so 1 sim year
+// = 720 physics-dt. From Kepler's third law T² = 4π²r³ / (G·M):
+//   G = (2π/T)² · r³ / M
+// All other planets inherit real-world periods (Mercury 88 d, Mars 687 d, …)
+// because their orbital radii are real AU multiples.
+const _EARTH_ORBIT_PERIOD_DT = 720;
+const _SUN_MASS_SIM = 1000;
+G_BASE = ((2 * Math.PI) / _EARTH_ORBIT_PERIOD_DT) ** 2 * Math.pow(_AU_SIM_UNITS, 3) / _SUN_MASS_SIM;
+
+// Real-world planet/Sun radius ratios. Multiplied by the Sun's sim radius (28)
+// to give each default planet its true relative size — Earth ends up ≈ 0.26
+// sim units (kept visible at zoom-out by the min-screen-radius logic in
+// drawBody).
+const REAL_PLANET_RADIUS_RATIOS = {
+  'Mercury': 2439.7 / 695700,    // 0.003507
+  'Venus':   6051.8 / 695700,    // 0.008700
+  'Earth':   6371.0 / 695700,    // 0.009158
+  'Mars':    3389.5 / 695700,    // 0.004872
+  'Jupiter': 69911  / 695700,    // 0.10049
+  'Saturn':  58232  / 695700,    // 0.08370
+  'Uranus':  25362  / 695700,    // 0.03646
+  'Neptune': 24622  / 695700,    // 0.03539
+  'Pluto':   1188.3 / 695700     // 0.001708
 };
 
 // ---- Resize ----
@@ -104,16 +150,27 @@ function createDefaultBodies() {
     createdAtSim: simTime
   });
 
+  // Earth sits at exactly 1 AU = 11,727.399231907132727670392677483 × Earth's
+  // (reference) diameter away from the Sun. Other planet distances follow real
+  // AU multiples. Planet MASSES now use real Sun:planet ratios — Sun = 1000
+  // sim units, so e.g. Earth = 1000 / 333000 ≈ 3.0e-3. The AU constant is
+  // anchored to a fixed reference Earth diameter (mass-3 radius) so distances
+  // don't shrink alongside the real-ratio masses.
+  const AU_IN_EARTH_DIAMETERS = 11727.399231907132727670392677483;
+  const EARTH_RADIUS_REF = 3 + Math.cbrt(3) * 2.2;
+  const AU = AU_IN_EARTH_DIAMETERS * EARTH_RADIUS_REF * 2;
+  // Sun:planet mass ratios (IAU values, rounded). Sun mass = 1000 sim units.
+  const SUN_MASS = 1000;
   const planets = [
-    { name: 'Mercury', dist: 80,  mass: 1,    color: '#b0b0b0' },
-    { name: 'Venus',   dist: 120, mass: 2,    color: '#e8c56d' },
-    { name: 'Earth',   dist: 170, mass: 3,    color: '#4da6ff' },
-    { name: 'Mars',    dist: 230, mass: 1.5,  color: '#e85d3a' },
-    { name: 'Jupiter', dist: 320, mass: 15,   color: '#d4a574' },
-    { name: 'Saturn',  dist: 420, mass: 5,    color: '#e8d090' },
-    { name: 'Uranus',  dist: 530, mass: 1.5,  color: '#a8dde0' },
-    { name: 'Neptune', dist: 640, mass: 1.7,  color: '#3158d4' },
-    { name: 'Pluto',   dist: 740, mass: 0.1,  color: '#a89080' }
+    { name: 'Mercury', dist: AU * 0.387, mass: SUN_MASS / 6_023_600,   color: '#b0b0b0' }, // 1:6.02M
+    { name: 'Venus',   dist: AU * 0.723, mass: SUN_MASS / 408_524,     color: '#e8c56d' }, // 1:408k
+    { name: 'Earth',   dist: AU,         mass: SUN_MASS / 333_000,     color: '#4da6ff' }, // 1:333k
+    { name: 'Mars',    dist: AU * 1.524, mass: SUN_MASS / 3_098_710,   color: '#e85d3a' }, // 1:3.1M
+    { name: 'Jupiter', dist: AU * 5.203, mass: SUN_MASS / 1047.35,     color: '#d4a574' }, // 1:1047
+    { name: 'Saturn',  dist: AU * 9.537, mass: SUN_MASS / 3498.5,      color: '#e8d090' }, // 1:3499
+    { name: 'Uranus',  dist: AU * 19.19, mass: SUN_MASS / 22_903,      color: '#a8dde0' }, // 1:22.9k
+    { name: 'Neptune', dist: AU * 30.07, mass: SUN_MASS / 19_412,      color: '#3158d4' }, // 1:19.4k
+    { name: 'Pluto',   dist: AU * 39.48, mass: SUN_MASS / 145_000_000, color: '#a89080' }  // 1:145M
   ];
 
   for (const p of planets) {
@@ -126,7 +183,12 @@ function createDefaultBodies() {
       y: cy + Math.sin(angle) * p.dist,
       vx: -Math.sin(angle) * orbitalV,
       vy: Math.cos(angle) * orbitalV,
-      mass: p.mass, radius: 3 + Math.cbrt(p.mass) * 2.2,
+      mass: p.mass,
+      // Real Sun:planet radius ratio × Sun's sim radius. Falls back to the
+      // mass-based formula for any planet name not in the lookup.
+      radius: REAL_PLANET_RADIUS_RATIOS[p.name] != null
+        ? 28 * REAL_PLANET_RADIUS_RATIOS[p.name]
+        : 3 + Math.cbrt(p.mass) * 2.2,
       color: p.color, trail: [],
       velMul: 1
     };
@@ -146,22 +208,27 @@ function computeAccel(bodies) {
   const n = bodies.length;
   const ax = new Float64Array(n);
   const ay = new Float64Array(n);
+  const az = new Float64Array(n);
   for (let i = 0; i < n; i++) {
+    const bi = bodies[i];
+    const zi = bi.z || 0;
     for (let j = i + 1; j < n; j++) {
-      const dx = bodies[j].x - bodies[i].x;
-      const dy = bodies[j].y - bodies[i].y;
-      const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
+      const bj = bodies[j];
+      const dx = bj.x - bi.x;
+      const dy = bj.y - bi.y;
+      const dz = (bj.z || 0) - zi;
+      const distSq = dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING;
       const dist = Math.sqrt(distSq);
       const force = G_BASE / (distSq * dist);
-      const fxj = dx * force * bodies[j].mass;
-      const fyj = dy * force * bodies[j].mass;
-      const fxi = dx * force * bodies[i].mass;
-      const fyi = dy * force * bodies[i].mass;
-      ax[i] += fxj; ay[i] += fyj;
-      ax[j] -= fxi; ay[j] -= fyi;
+      ax[i] += dx * force * bj.mass;
+      ay[i] += dy * force * bj.mass;
+      az[i] += dz * force * bj.mass;
+      ax[j] -= dx * force * bi.mass;
+      ay[j] -= dy * force * bi.mass;
+      az[j] -= dz * force * bi.mass;
     }
   }
-  return { ax, ay };
+  return { ax, ay, az };
 }
 
 function step(dt) {
@@ -169,15 +236,20 @@ function step(dt) {
   if (n === 0) return;
 
   // Velocity Verlet
-  let { ax, ay } = computeAccel(bodies);
+  let { ax, ay, az } = computeAccel(bodies);
 
   // Half-step velocity & full-step position (locked bodies don't move)
   for (let i = 0; i < n; i++) {
-    if (bodies[i].locked) continue;
-    bodies[i].vx += ax[i] * dt * 0.5;
-    bodies[i].vy += ay[i] * dt * 0.5;
-    bodies[i].x += bodies[i].vx * dt;
-    bodies[i].y += bodies[i].vy * dt;
+    const b = bodies[i];
+    if (b.locked) continue;
+    if (b.vz === undefined) b.vz = 0;
+    if (b.z === undefined) b.z = 0;
+    b.vx += ax[i] * dt * 0.5;
+    b.vy += ay[i] * dt * 0.5;
+    b.vz += az[i] * dt * 0.5;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.z += b.vz * dt;
   }
 
   // Recompute accel at new positions
@@ -188,12 +260,13 @@ function step(dt) {
     if (bodies[i].locked) continue;
     bodies[i].vx += a2.ax[i] * dt * 0.5;
     bodies[i].vy += a2.ay[i] * dt * 0.5;
+    bodies[i].vz += a2.az[i] * dt * 0.5;
   }
 
   // Record trails (locked bodies aren't moving so we skip them)
   for (const b of bodies) {
     if (b.locked) continue;
-    b.trail.push({ x: b.x, y: b.y });
+    b.trail.push({ x: b.x, y: b.y, z: b.z || 0 });
     if (b.trail.length > TRAIL_LEN) b.trail.shift();
   }
 
@@ -209,7 +282,8 @@ function checkCollisions() {
       if (toRemove.has(j)) continue;
       const dx = bodies[j].x - bodies[i].x;
       const dy = bodies[j].y - bodies[i].y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+      const dz = (bodies[j].z || 0) - (bodies[i].z || 0);
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const r_i = getEffectiveRadius(bodies[i]);
       const r_j = getEffectiveRadius(bodies[j]);
       const minDist = r_i + r_j;
@@ -248,8 +322,10 @@ function checkCollisions() {
         if (!a.locked) {
           a.x = (a.x * a.mass + b.x * b.mass) / totalMass;
           a.y = (a.y * a.mass + b.y * b.mass) / totalMass;
+          a.z = ((a.z || 0) * a.mass + (b.z || 0) * b.mass) / totalMass;
           a.vx = (a.vx * a.mass + b.vx * b.mass) / totalMass;
           a.vy = (a.vy * a.mass + b.vy * b.mass) / totalMass;
+          a.vz = ((a.vz || 0) * a.mass + (b.vz || 0) * b.mass) / totalMass;
         }
         a.mass = totalMass;
         // Dwarf star crossing the ignition threshold becomes a real star
@@ -298,7 +374,8 @@ function checkBlackHoleCapture() {
       if (bodies[i].locked) continue; // anchored bodies resist capture
       const b = bodies[i];
       const dx = b.x - bh.x, dy = b.y - bh.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+      const dz = (b.z || 0) - (bh.z || 0);
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (dist < captureR && dist > bh.radius) {
         if (!bh.accretionRing) bh.accretionRing = [];
         const angle = Math.atan2(dy, dx);
@@ -1777,50 +1854,52 @@ function updateRockets(dtUnits) {
   }
 }
 
-function drawRockets(t) {
-  for (const r of rockets) {
-    // Flame trail (skip when sitting on a planet surface)
-    if (r.state !== 'landed') {
-      const flameLen = 10 + 4 * Math.sin(t * 0.02);
-      const fx = r.x - Math.cos(r.heading) * flameLen;
-      const fy = r.y - Math.sin(r.heading) * flameLen;
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const fg = ctx.createLinearGradient(r.x, r.y, fx, fy);
-      fg.addColorStop(0, 'rgba(255,220,80,0.95)');
-      fg.addColorStop(0.5, 'rgba(255,120,40,0.55)');
-      fg.addColorStop(1, 'rgba(255,40,20,0)');
-      ctx.strokeStyle = fg;
-      ctx.lineCap = 'round';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(r.x, r.y);
-      ctx.lineTo(fx, fy);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // Rocket body — small triangle
+function drawSingleRocket(r, t) {
+  // Flame trail (skip when sitting on a planet surface)
+  if (r.state !== 'landed') {
+    const flameLen = 10 + 4 * Math.sin(t * 0.02);
+    const fx = r.x - Math.cos(r.heading) * flameLen;
+    const fy = r.y - Math.sin(r.heading) * flameLen;
     ctx.save();
-    ctx.translate(r.x, r.y);
-    ctx.rotate(r.heading);
-    ctx.fillStyle = '#e8eef5';
+    ctx.globalCompositeOperation = 'lighter';
+    const fg = ctx.createLinearGradient(r.x, r.y, fx, fy);
+    fg.addColorStop(0, 'rgba(255,220,80,0.95)');
+    fg.addColorStop(0.5, 'rgba(255,120,40,0.55)');
+    fg.addColorStop(1, 'rgba(255,40,20,0)');
+    ctx.strokeStyle = fg;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.moveTo(7, 0);
-    ctx.lineTo(-4, 3);
-    ctx.lineTo(-4, -3);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#7dd3fc';
-    ctx.lineWidth = 0.8;
+    ctx.moveTo(r.x, r.y);
+    ctx.lineTo(fx, fy);
     ctx.stroke();
-    // Cockpit window
-    ctx.fillStyle = '#7dd3fc';
-    ctx.beginPath();
-    ctx.arc(1, 0, 1.2, 0, Math.PI * 2);
-    ctx.fill();
     ctx.restore();
   }
+
+  // Rocket body — small triangle
+  ctx.save();
+  ctx.translate(r.x, r.y);
+  ctx.rotate(r.heading);
+  ctx.fillStyle = '#e8eef5';
+  ctx.beginPath();
+  ctx.moveTo(7, 0);
+  ctx.lineTo(-4, 3);
+  ctx.lineTo(-4, -3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#7dd3fc';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  // Cockpit window
+  ctx.fillStyle = '#7dd3fc';
+  ctx.beginPath();
+  ctx.arc(1, 0, 1.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRockets(t) {
+  for (const r of rockets) drawSingleRocket(r, t);
 }
 
 // ---- Rendering ----
@@ -1848,15 +1927,17 @@ function drawStars(t) {
 //   Black hole: 3 hrs → evaporating (30 min) → removed
 // Phases are sticky; changing mass via slider resets to main sequence
 
-// Spectral-class main-sequence lifespans (seconds). Lower mass = longer life.
-// Priority for overlapping ranges: O > B > A > F > G > K > M.
-//   O 16,000–100,000:        60s → 3s
-//   B 2,000–15,999:          300s (5m)   → 60s (1m)
-//   A 1,400–1,999:           3,000s (50m) → 300s (5m)
-//   F 1,040–1,399:           9,000s (150m) → 3,000s (50m)
-//   G 800–1,039:             30,000s (500m) → 9,000s (150m)
-//   K 450–799:               90,000s (1500m) → 30,000s (500m)
-//   M 80–449:                30,000,000s (500,000m) → 90,000s (1500m)
+// Spectral-class main-sequence lifespans. With the post-rescale time unit
+// (1× speed = 1 sim month per real second), all values below are MONTHS, and
+// each band's endpoints are the user-specified years × 12.
+// Priority for overlapping ranges: O > B > A > F > G > K > M. Lower mass = longer life.
+//   M 80–449:        10 T  yr  →  100 B yr     (1.2e14 → 1.2e12  months)
+//   K 450–799:       100 B yr  →  70  B yr     (1.2e12 → 8.4e11  months)
+//   G 800–1,039:     70  B yr  →  9   B yr     (8.4e11 → 1.08e11 months)
+//   F 1,040–1,399:   9   B yr  →  2   B yr     (1.08e11 → 2.4e10 months)
+//   A 1,400–1,999:   2   B yr  →  1   B yr     (2.4e10 → 1.2e10 months)
+//   B 2,000–15,999:  1   B yr  →  10  M yr     (1.2e10 → 1.2e8  months)
+//   O 16,000–100,000:10  M yr  →  3   M yr     (1.2e8  → 3.6e7  months)
 function getSpectralLifespanSec(mass) {
   const lerp = (m, m0, m1, s0, s1) => {
     const t = Math.max(0, Math.min(1, (m - m0) / (m1 - m0)));
@@ -1869,13 +1950,13 @@ function getSpectralLifespanSec(mass) {
   const isGType = !isOType && !isBType && !isAType && !isFType && mass >= 800 && mass <= 1400;
   const isKType = !isOType && !isBType && !isAType && !isFType && !isGType && mass >= 450 && mass <= 800;
   const isMType = !isOType && !isBType && !isAType && !isFType && !isGType && !isKType && mass >= 80 && mass <= 600;
-  if (isOType) return lerp(mass, 16000, 100000, 60, 3);
-  if (isBType) return lerp(mass, 2000, 15999, 300, 60);
-  if (isAType) return lerp(mass, 1400, 1999, 3000, 300);
-  if (isFType) return lerp(mass, 1040, 1399, 9000, 3000);
-  if (isGType) return lerp(mass, 800, 1039, 30000, 9000);
-  if (isKType) return lerp(mass, 450, 799, 90000, 30000);
-  if (isMType) return lerp(mass, 80, 449, 30000000, 90000);
+  if (isOType) return lerp(mass, 16000, 100000, 1.2e8,  3.6e7);
+  if (isBType) return lerp(mass, 2000,  15999,  1.2e10, 1.2e8);
+  if (isAType) return lerp(mass, 1400,  1999,   2.4e10, 1.2e10);
+  if (isFType) return lerp(mass, 1040,  1399,   1.08e11,2.4e10);
+  if (isGType) return lerp(mass, 800,   1039,   8.4e11, 1.08e11);
+  if (isKType) return lerp(mass, 450,   799,    1.2e12, 8.4e11);
+  if (isMType) return lerp(mass, 80,    449,    1.2e14, 1.2e12);
   return null;
 }
 
@@ -1894,24 +1975,42 @@ function getBlackHoleLifespanSec(simMass) {
 }
 
 // Higher mass → shorter post-MS phase. Each function clamps to its declared
-// mass band and lerps linearly between the two endpoints.
+// mass band and lerps linearly between the two endpoints. All values below
+// are in MONTHS (post-rescale unit; 1× = 1 month / real sec).
 function _lerpClamp(m, m0, m1, s0, s1) {
   const t = Math.max(0, Math.min(1, (m - m0) / (m1 - m0)));
   return s0 + (s1 - s0) * t;
 }
-function getRedGiantDurationSec(simMass) {       // 0.25s @ 2500 → 500s (8m20s) @ 501
+function getRedGiantDurationSec(simMass) {
+  // Brief red-giant phase for normal post-MS stars (mass 501–2500). Kept short
+  // so it reads as a transitional flash; red SUPER giants have their own
+  // duration function below.
   return _lerpClamp(simMass, 501, 2500, 500, 0.25);
 }
-function getBlueSuperGiantDurationSec(simMass) { // 1500s (25m) @ 2501 → 300s (5m) @ 100000+
-  return _lerpClamp(simMass, 2501, 100000, 1500, 300);
+function getRedSuperGiantDurationSec() {
+  // 1 M yr → 500 K yr (random per star).  1.2e7 → 6e6 months.
+  return 6e6 + Math.random() * 6e6;
 }
-function getKSuperGiantDurationSec(simMass) {    // 1500s @ 501 → 300s @ 2500
-  return _lerpClamp(simMass, 501, 2500, 1500, 300);
+function getBlueSuperGiantDurationSec(simMass) {
+  // 10 M yr @ 2501  →  2 M yr @ 100000+   (1.2e8 → 2.4e7 months)
+  return _lerpClamp(simMass, 2501, 100000, 1.2e8, 2.4e7);
 }
-function getWolfRayetDurationSec(simMass) {      // 1500s (25m) @ 16000 → 0.25s @ 100000
+function getKSuperGiantDurationSec(simMass) {
+  // 50 M yr @ 501  →  10 M yr @ 2500      (6e8 → 1.2e8 months)
+  return _lerpClamp(simMass, 501, 2500, 6e8, 1.2e8);
+}
+function getWolfRayetDurationSec(simMass) {
+  // Mass-shed transition phase; left short relative to MS lifetime.
   return _lerpClamp(simMass, 16000, 100000, 1500, 0.25);
 }
-const NEUTRON_TOTAL_LIFESPAN_SEC = 2_500_000; // 41,666m 40s — total NS life until black dwarf
+function getNeutronBeamDurationSec() {
+  // Pulsar-beam phase: 5 K yr → 5 M yr (random).  60 K → 60 M months.
+  return 60000 + Math.random() * (60_000_000 - 60_000);
+}
+function getNeutronTotalLifespanSec() {
+  // Total neutron-star life: 10 B yr → 100 B yr (random).  1.2e11 → 1.2e12 months.
+  return 1.2e11 + Math.random() * (1.2e12 - 1.2e11);
+}
 
 function checkStellarEvolution() {
   for (let i = bodies.length - 1; i >= 0; i--) {
@@ -2014,12 +2113,12 @@ function checkStellarEvolution() {
       }
       continue;
     }
-    // Neutron star (with beam) → after 5–50 min loses its beam and becomes
-    // a "dormant" neutron star. Never collapses to a black hole anymore.
+    // Neutron star (with beam) → after the pulsar beam expires it becomes a
+    // "dormant" neutron star. Beam duration randomized per star to 5K–5M yr.
     if (sun.stellarPhase === 'neutron-star') {
       const since = (simTime - sun.phaseAtSim) / 1000;
       if (sun.neutronBeamDuration == null) {
-        sun.neutronBeamDuration = 300 + Math.random() * 2700; // 5–50 min
+        sun.neutronBeamDuration = getNeutronBeamDurationSec();
       }
       if (sun.neutronStartSim == null) sun.neutronStartSim = sun.phaseAtSim;
       if (since >= sun.neutronBeamDuration) {
@@ -2028,13 +2127,15 @@ function checkStellarEvolution() {
       }
       continue;
     }
-    // Dormant neutron star → after 2,500,000 s (41,666m 40s) of TOTAL neutron-
-    // star life (counting from the original NS formation), becomes a black
-    // dwarf. Same rendering as a neutron star but no rotating beam.
+    // Dormant neutron star → after the per-star total NS lifespan (10–100 B yr)
+    // it becomes a black dwarf. Same rendering as a neutron star but no beam.
     if (sun.stellarPhase === 'dormant-neutron-star') {
       if (sun.neutronStartSim == null) sun.neutronStartSim = sun.phaseAtSim;
+      if (sun.neutronTotalLifespan == null) {
+        sun.neutronTotalLifespan = getNeutronTotalLifespanSec();
+      }
       const totalSince = (simTime - sun.neutronStartSim) / 1000;
-      if (totalSince >= NEUTRON_TOTAL_LIFESPAN_SEC) {
+      if (totalSince >= sun.neutronTotalLifespan) {
         sun.stellarPhase = 'black-dwarf';
         sun.radius = 28 + Math.cbrt(sun.mass / 1000) * 4;
       }
@@ -2080,7 +2181,11 @@ function checkStellarEvolution() {
     if (sun.stellarPhase === 'red-giant') {
       if (sun.redGiantAtSim != null) {
         const sinceRG = (simTime - sun.redGiantAtSim) / 1000;
-        if (sun.redGiantDuration == null) sun.redGiantDuration = getRedGiantDurationSec(sun.mass);
+        if (sun.redGiantDuration == null) {
+          sun.redGiantDuration = sun.redSuperGiant
+            ? getRedSuperGiantDurationSec()
+            : getRedGiantDurationSec(sun.mass);
+        }
         if (sinceRG >= sun.redGiantDuration) {
           sun.stellarPhase = 'collapsing';
           sun.phaseAtSim = simTime;
@@ -2388,30 +2493,18 @@ function getRedGiantFactor(sun) {
 
 function getPhaseLabel(sun) {
   const phase = getSunPhase(sun);
-  const fmtTime = (s) => {
-    if (s < 0) s = 0;
-    const YEAR = 365.25 * 86400;
-    // For astronomically huge values (black-hole lifespans) drop to
-    // scientific years so the readout stays compact.
-    if (s >= YEAR * 1000) return (s / YEAR).toExponential(2) + ' yr';
-    if (s >= YEAR) {
-      const y = Math.floor(s / YEAR);
-      const d = Math.floor((s % YEAR) / 86400);
-      return y + 'y ' + d + 'd';
-    }
-    if (s >= 86400) {
-      const d = Math.floor(s / 86400);
-      const h = Math.floor((s % 86400) / 3600);
-      return d + 'd ' + h + 'h';
-    }
-    if (s >= 3600) {
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      return h + 'h ' + m + 'm';
-    }
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+  // Input is now in MONTHS (post-rescale: 1× speed = 1 sim month / real sec).
+  // Output prefers years with a scale suffix; falls back to "mo" only below a
+  // year, since the user-facing star lifespans are all measured in years.
+  const fmtTime = (months) => {
+    if (months < 0 || !isFinite(months)) months = 0;
+    const yrs = months / 12;
+    if (yrs >= 1e12) return (yrs / 1e12).toFixed(2) + ' T yr';
+    if (yrs >= 1e9)  return (yrs / 1e9).toFixed(2) + ' B yr';
+    if (yrs >= 1e6)  return (yrs / 1e6).toFixed(2) + ' M yr';
+    if (yrs >= 1e3)  return (yrs / 1e3).toFixed(2) + ' k yr';
+    if (yrs >= 1)    return yrs.toFixed(1) + ' yr';
+    return Math.round(months) + ' mo';
   };
 
   if (phase === 'black-dwarf') return '● Black Dwarf';
@@ -2446,7 +2539,9 @@ function getPhaseLabel(sun) {
     if (isBetelgeuseLike(sun)) return '🔴 Red Super Giant · stable';
     const label = sun.redSuperGiant ? '🔴 Red Super Giant' : '🔴 Red Giant';
     if (sun.redGiantAtSim != null) {
-      const dur = sun.redGiantDuration ?? getRedGiantDurationSec(sun.mass);
+      const dur = sun.redGiantDuration ?? (sun.redSuperGiant
+        ? getRedSuperGiantDurationSec()
+        : getRedGiantDurationSec(sun.mass));
       const remaining = dur - (simTime - sun.redGiantAtSim) / 1000;
       return label + ' · ' + fmtTime(remaining) + ' left';
     }
@@ -2493,7 +2588,8 @@ function getPhaseLabel(sun) {
                 : sun.strangeMatter ? '🟢 Dormant Strange NS'
                 : '💫 Cold Neutron Star';
     if (sun.neutronStartSim != null) {
-      const remaining = NEUTRON_TOTAL_LIFESPAN_SEC - (simTime - sun.neutronStartSim) / 1000;
+      if (sun.neutronTotalLifespan == null) sun.neutronTotalLifespan = getNeutronTotalLifespanSec();
+      const remaining = sun.neutronTotalLifespan - (simTime - sun.neutronStartSim) / 1000;
       return label + ' · ' + fmtTime(remaining) + ' to black dwarf';
     }
     return label;
@@ -3309,7 +3405,22 @@ function sunFaceMood(phase) {
   }
 }
 
+// Compute the current canvas transform's average scale factor (world → screen).
+// Used to enforce a minimum on-screen body size at extreme zoom-out.
+function currentScreenScale() {
+  const tr = ctx.getTransform();
+  // Average the x and y scale; DPR shows up here so we strip it back out.
+  return (Math.abs(tr.a) + Math.abs(tr.d)) / (2 * RENDER_DPR);
+}
+
 function drawBody(b, t) {
+  // Bodies always draw at their real size. At extreme zoom-out the AU-scale
+  // planets become sub-pixel dots (as they would in reality) — zoom in to see
+  // them. The unused _bodyOrigR / try-finally below preserves the swap point
+  // in case a minimum is ever reintroduced.
+  const _bodyOrigR = b.radius;
+  try {
+
   if (b.isSun) {
     const evo = getSunEvolutionFactor(b);
     const phase = getSunPhase(b);
@@ -3492,10 +3603,18 @@ function drawBody(b, t) {
     // Restore the body's stored radius so physics / sliders see the real value
     if (_displayR !== _origR) b.radius = _origR;
   }
+
+  } finally {
+    // Restore the min-screen-radius swap from the top of the function.
+    b.radius = _bodyOrigR;
+  }
 }
 
 function drawTrails() {
   if (!showTrails) return;
+  // Keep the trail stroke at a constant screen-space width regardless of zoom,
+  // so AU-scale orbits stay visible even when the camera is zoomed far out.
+  const screenLineWidth = 1.2 / viewZoom;
   for (const b of bodies) {
     if (b.trail.length < 2) continue;
     ctx.beginPath();
@@ -3504,7 +3623,7 @@ function drawTrails() {
       ctx.lineTo(b.trail[i].x, b.trail[i].y);
     }
     ctx.strokeStyle = b.color;
-    ctx.lineWidth = b.isSun ? 0 : 1.2;
+    ctx.lineWidth = b.isSun ? 0 : screenLineWidth;
     ctx.globalAlpha = 0.3;
     ctx.stroke();
     ctx.globalAlpha = 1;
@@ -3535,14 +3654,117 @@ function drawMergeEffects() {
   }
 }
 
+// 3D variant: same effect lifecycle but particle positions are projected
+// individually to screen space so they sit at the correct depth.
+function drawMergeEffects3D() {
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  for (let e = mergeEffects.length - 1; e >= 0; e--) {
+    const eff = mergeEffects[e];
+    if (!paused) {
+      eff.age++;
+      for (const p of eff.particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.025;
+      }
+      eff.particles = eff.particles.filter(p => p.life > 0);
+    }
+    if (eff.particles.length === 0) { mergeEffects.splice(e, 1); continue; }
+    const ez = eff.z || 0;
+    for (const p of eff.particles) {
+      const proj = project3DScreen(p.x, p.y, ez);
+      ctx.globalAlpha = p.life * 0.8;
+      ctx.fillStyle = eff.color;
+      ctx.beginPath();
+      ctx.arc(proj.sx, proj.sy, 2 * p.life * Math.max(0.1, proj.scale), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
 // ---- Camera (follows the primary sun until the user pans/zooms) ----
 let viewX = 0, viewY = 0;     // world-space point centered on screen
 let viewZoom = 1;             // 1 = default; >1 zooms in
 let autoFollow = true;
 
+// ---- 3D Mode ----
+// When is3D is true, bodies carry z + vz and rendering applies a perspective
+// projection with yaw/pitch camera rotation. The default solar system lives
+// in the z=0 plane, so 3D mode initially just tilts the view; z gradients
+// appear once bodies are dragged or created with z motion.
+let is3D = false;
+let cameraYaw = 0;            // rotation around vertical (Y) axis, radians
+let cameraPitch = 0;          // rotation around horizontal (X) axis, radians
+const PERSPECTIVE_FOCAL = 1500;
+
+function project3D(wx, wy, wz) {
+  const dx = wx - viewX, dy = wy - viewY, dz = (wz || 0);
+  // Yaw around Y axis (left/right camera turn)
+  const cy = Math.cos(cameraYaw), sy = Math.sin(cameraYaw);
+  const x1 = dx * cy + dz * sy;
+  const z1 = -dx * sy + dz * cy;
+  // Pitch around X axis (up/down camera tilt)
+  const cp = Math.cos(cameraPitch), sp = Math.sin(cameraPitch);
+  const y2 = dy * cp - z1 * sp;
+  const z2 = dy * sp + z1 * cp;
+  // Perspective is applied in screen-space depth (world z × viewZoom). Because
+  // the simulator spans world distances from a few units to many millions, a
+  // fixed world-space focal would collapse anything past a few thousand units
+  // to a single pixel. Scaling the depth by viewZoom keeps the perspective
+  // sensible whether the view is zoomed into a single planet or out to Pluto.
+  const screenZ = z2 * viewZoom;
+  const denom = Math.max(50, PERSPECTIVE_FOCAL + screenZ);
+  const perspective = PERSPECTIVE_FOCAL / denom;
+  return { x: x1, y: y2, z: z2, perspective };
+}
+
+// 3D screen-space projection that also folds in the user's 2D zoom.
+function project3DScreen(wx, wy, wz) {
+  const p = project3D(wx, wy, wz);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const totalScale = viewZoom * p.perspective;
+  return { sx: w / 2 + p.x * totalScale, sy: h / 2 + p.y * totalScale, scale: totalScale, depth: p.z };
+}
+
+// Set up the canvas transform so drawing at world-space (wx, wy) lands at
+// its projected screen position with the correct perspective scale. Caller
+// must wrap with ctx.save() / ctx.restore().
+function applyEntity3DTransform(wx, wy, wz) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const p = project3D(wx, wy, wz);
+  const totalScale = viewZoom * p.perspective;
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.translate(w / 2 + p.x * totalScale, h / 2 + p.y * totalScale);
+  ctx.scale(totalScale, totalScale);
+  ctx.translate(-wx, -wy);
+  return p;
+}
+
 function screenToWorld(sx, sy) {
   const rect = canvas.getBoundingClientRect();
   const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (is3D) {
+    // Inverse projection into the z=0 world plane. Solves for the (X, Y, 0)
+    // world point whose projected screen position equals (sx, sy). This is
+    // what dragging / spawning expects to land "in the orbital plane".
+    const nx = (sx - rect.left - w / 2) / viewZoom;
+    const ny = (sy - rect.top - h / 2) / viewZoom;
+    // Forward transform (with z=0):
+    //   x' =  dx*cos(yaw)
+    //   y' =  dy*cos(pitch) + dx*sin(yaw)*sin(pitch)
+    // We need a non-perspective inverse here — perspective with z=0 collapses
+    // to scale=1, so the linear inverse below is exact for the orbital plane.
+    const cy = Math.cos(cameraYaw), sy_ = Math.sin(cameraYaw);
+    const cp = Math.cos(cameraPitch), sp = Math.sin(cameraPitch);
+    // From x' = dx*cy  →  dx = x'/cy (yaw avoided when cy≈0 by falling back)
+    if (Math.abs(cy) < 1e-6 || Math.abs(cp) < 1e-6) {
+      return { x: viewX + nx, y: viewY + ny };
+    }
+    const dx = nx / cy;
+    const dy = (ny - dx * sy_ * sp) / cp;
+    return { x: viewX + dx, y: viewY + dy };
+  }
   return {
     x: (sx - rect.left - w / 2) / viewZoom + viewX,
     y: (sy - rect.top - h / 2) / viewZoom + viewY
@@ -3629,87 +3851,208 @@ function loop(t) {
     }
   }
 
-  // Apply camera transform: center the world-space view point on screen, then scale
-  ctx.save();
-  ctx.translate(w / 2, h / 2);
-  ctx.scale(viewZoom, viewZoom);
-  ctx.translate(-viewX, -viewY);
-
-  drawGalaxies();
-  drawTrails();
-
-  // Draw bodies (suns first, then planets on top)
-  for (const b of bodies) { if (b.isSun) drawBody(b, animTime); }
-  for (const b of bodies) { if (!b.isSun) drawBody(b, animTime); }
-
-  drawRockets(animTime);
-  drawMergeEffects();
-
-  // Draw selection rings for the two equation-bar picks (A in green, B in cyan)
+  // Selection bookkeeping (used by both 2D and 3D paths below)
   const bodyA = selectedBodyAId ? bodies.find(b => b.id === selectedBodyAId) : null;
   const bodyB = selectedBodyBId ? bodies.find(b => b.id === selectedBodyBId) : null;
   if (selectedBodyAId && !bodyA) selectedBodyAId = null;
   if (selectedBodyBId && !bodyB) selectedBodyBId = null;
-  const drawSelRing = (b, color) => {
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
-    ctx.globalAlpha = 0.6 + 0.3 * Math.sin(animTime * 0.005);
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, getEffectiveRadius(b) + 6, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-  };
-  if (bodyA) drawSelRing(bodyA, '#34d399'); // green = A
-  if (bodyB) drawSelRing(bodyB, '#7dd3fc'); // cyan  = B
-  if (bodyA && bodyB && bodyA !== bodyB) updateEquation(bodyA, bodyB);
-  else if (!bodyA || !bodyB) clearEquation();
 
-  // Draw velocity vectors
-  if (showVectors) {
-    for (const b of bodies) {
-      const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-      if (speed < 0.01) continue;
-      const tipX = b.x + b.vx * VEL_ARROW_SCALE;
-      const tipY = b.y + b.vy * VEL_ARROW_SCALE;
-      const angle = Math.atan2(b.vy, b.vx);
-
+  if (is3D) {
+    // ---- 3D render path ----
+    // Galaxies are huge background discs — draw first with their own transform.
+    for (const g of galaxies) {
       ctx.save();
-      // Arrow line
-      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(b.x, b.y);
-      ctx.lineTo(tipX, tipY);
-      ctx.stroke();
-
-      // Arrowhead
-      const headLen = 8;
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(tipX - headLen * Math.cos(angle - 0.4), tipY - headLen * Math.sin(angle - 0.4));
-      ctx.lineTo(tipX - headLen * Math.cos(angle + 0.4), tipY - headLen * Math.sin(angle + 0.4));
-      ctx.closePath();
-      ctx.fill();
-
-      // Draggable tip handle
-      ctx.fillStyle = b.color || '#fff';
-      ctx.globalAlpha = 0.85;
-      ctx.beginPath();
-      ctx.arc(tipX, tipY, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
-      ctx.globalAlpha = 0.5;
-      ctx.stroke();
-
+      applyEntity3DTransform(g.x, g.y, 0);
+      if (g.type === 'universe') drawUniverse(g);
+      else if (g.type === 'laniakea') drawLaniakea(g);
+      else drawGalaxy(g);
       ctx.restore();
     }
-  }
 
-  ctx.restore(); // end camera transform
+    // Trails: project each point and stroke in screen space.
+    if (showTrails) {
+      ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+      for (const b of bodies) {
+        if (b.trail.length < 2) continue;
+        ctx.beginPath();
+        let started = false;
+        for (const pt of b.trail) {
+          const proj = project3DScreen(pt.x, pt.y, pt.z || 0);
+          if (!started) { ctx.moveTo(proj.sx, proj.sy); started = true; }
+          else ctx.lineTo(proj.sx, proj.sy);
+        }
+        ctx.strokeStyle = b.color;
+        ctx.lineWidth = b.isSun ? 0 : 1.2;
+        ctx.globalAlpha = 0.3;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Depth-sort bodies back to front (suns first within equal depth).
+    const sorted = bodies.map(b => ({ body: b, depth: project3D(b.x, b.y, b.z || 0).z }));
+    sorted.sort((a, b) => {
+      if (b.depth !== a.depth) return b.depth - a.depth;
+      // For equal depth (or near-equal), draw suns first so planets layer on top
+      return (a.body.isSun ? 0 : 1) - (b.body.isSun ? 0 : 1);
+    });
+    for (const { body } of sorted) {
+      ctx.save();
+      applyEntity3DTransform(body.x, body.y, body.z || 0);
+      drawBody(body, animTime);
+      ctx.restore();
+    }
+
+    // Rockets: each gets its own per-entity transform.
+    for (const r of rockets) {
+      ctx.save();
+      applyEntity3DTransform(r.x, r.y, r.z || 0);
+      drawSingleRocket(r, animTime);
+      ctx.restore();
+    }
+
+    // Merge effects in screen space
+    drawMergeEffects3D();
+
+    // Selection rings
+    const drawSelRing3D = (b, color) => {
+      ctx.save();
+      applyEntity3DTransform(b.x, b.y, b.z || 0);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.globalAlpha = 0.6 + 0.3 * Math.sin(animTime * 0.005);
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, getEffectiveRadius(b) + 6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+    if (bodyA) drawSelRing3D(bodyA, '#34d399');
+    if (bodyB) drawSelRing3D(bodyB, '#7dd3fc');
+    if (bodyA && bodyB && bodyA !== bodyB) updateEquation(bodyA, bodyB);
+    else if (!bodyA || !bodyB) clearEquation();
+
+    // Velocity vectors: project endpoints individually
+    if (showVectors) {
+      ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+      for (const b of bodies) {
+        const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy + (b.vz || 0) * (b.vz || 0));
+        if (speed < 0.01) continue;
+        const tipWX = b.x + b.vx * VEL_ARROW_SCALE;
+        const tipWY = b.y + b.vy * VEL_ARROW_SCALE;
+        const tipWZ = (b.z || 0) + (b.vz || 0) * VEL_ARROW_SCALE;
+        const baseP = project3DScreen(b.x, b.y, b.z || 0);
+        const tipP = project3DScreen(tipWX, tipWY, tipWZ);
+        const angle = Math.atan2(tipP.sy - baseP.sy, tipP.sx - baseP.sx);
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(baseP.sx, baseP.sy);
+        ctx.lineTo(tipP.sx, tipP.sy);
+        ctx.stroke();
+        const headLen = 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.beginPath();
+        ctx.moveTo(tipP.sx, tipP.sy);
+        ctx.lineTo(tipP.sx - headLen * Math.cos(angle - 0.4), tipP.sy - headLen * Math.sin(angle - 0.4));
+        ctx.lineTo(tipP.sx - headLen * Math.cos(angle + 0.4), tipP.sy - headLen * Math.sin(angle + 0.4));
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = b.color || '#fff';
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.arc(tipP.sx, tipP.sy, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Restore identity so anything after (FPS overlay etc.) draws in screen space.
+    ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  } else {
+    // ---- 2D render path (existing behavior) ----
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(viewZoom, viewZoom);
+    ctx.translate(-viewX, -viewY);
+
+    drawGalaxies();
+    drawTrails();
+
+    // Draw bodies (suns first, then planets on top)
+    for (const b of bodies) { if (b.isSun) drawBody(b, animTime); }
+    for (const b of bodies) { if (!b.isSun) drawBody(b, animTime); }
+
+    drawRockets(animTime);
+    drawMergeEffects();
+
+    const drawSelRing = (b, color) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.globalAlpha = 0.6 + 0.3 * Math.sin(animTime * 0.005);
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, getEffectiveRadius(b) + 6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+    if (bodyA) drawSelRing(bodyA, '#34d399'); // green = A
+    if (bodyB) drawSelRing(bodyB, '#7dd3fc'); // cyan  = B
+    if (bodyA && bodyB && bodyA !== bodyB) updateEquation(bodyA, bodyB);
+    else if (!bodyA || !bodyB) clearEquation();
+
+    // Draw velocity vectors
+    if (showVectors) {
+      for (const b of bodies) {
+        const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+        if (speed < 0.01) continue;
+        const tipX = b.x + b.vx * VEL_ARROW_SCALE;
+        const tipY = b.y + b.vy * VEL_ARROW_SCALE;
+        const angle = Math.atan2(b.vy, b.vx);
+
+        ctx.save();
+        // Arrow line
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(tipX, tipY);
+        ctx.stroke();
+
+        // Arrowhead
+        const headLen = 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - headLen * Math.cos(angle - 0.4), tipY - headLen * Math.sin(angle - 0.4));
+        ctx.lineTo(tipX - headLen * Math.cos(angle + 0.4), tipY - headLen * Math.sin(angle + 0.4));
+        ctx.closePath();
+        ctx.fill();
+
+        // Draggable tip handle
+        ctx.fillStyle = b.color || '#fff';
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.arc(tipX, tipY, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+    }
+
+    ctx.restore(); // end camera transform
+  }
 
   // Rigel blind overlay sits on top of the camera transform in screen space
   drawBlindOverlay();
@@ -3784,10 +4127,17 @@ function buildControls() {
   let html = '';
   for (const p of planets) {
     const vmul = p.velMul !== undefined ? p.velMul : 1;
-    const isDwarfStar = p.mass > 50;
-    const isDwarfPlanet = p.mass < 1;
+    const isMoon = p.isMoon === true;
+    const isDwarfStar   = !isMoon && p.mass > 50;
+    const isDwarfPlanet = !isMoon && p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
+    const isPlanet      = !isMoon && !isDwarfStar && !isDwarfPlanet;
     const planetLockCls = p.locked ? 'lock-btn locked' : 'lock-btn';
     const planetLockIcon = p.locked ? '🔒' : '🔓';
+    let typeLabel = '';
+    if (isDwarfStar)        typeLabel = '<div style="font-size:0.7em;color:#a78bfa;margin-bottom:6px;letter-spacing:0.3px">◐ Dwarf Star</div>';
+    else if (isDwarfPlanet) typeLabel = '<div style="font-size:0.7em;color:#9ca3af;margin-bottom:6px;letter-spacing:0.3px">◌ Dwarf Planet</div>';
+    else if (isMoon)        typeLabel = '<div style="font-size:0.7em;color:#a0a4ad;margin-bottom:6px;letter-spacing:0.3px">🌑 Moon</div>';
+    else if (isPlanet)      typeLabel = '<div style="font-size:0.7em;color:#7dd3fc;margin-bottom:6px;letter-spacing:0.3px">🪐 Planet</div>';
     html += `
       <div class="body-card" id="card-${p.id}">
         <div class="body-card-header">
@@ -3799,12 +4149,11 @@ function buildControls() {
             <button class="remove-btn" onclick="removePlanet('${p.id}')" title="Remove">✕</button>
           </div>
         </div>
-        ${isDwarfStar ? '<div style="font-size:0.7em;color:#a78bfa;margin-bottom:6px;letter-spacing:0.3px">◐ Dwarf Star</div>' : ''}
-        ${isDwarfPlanet ? '<div style="font-size:0.7em;color:#9ca3af;margin-bottom:6px;letter-spacing:0.3px">◌ Dwarf Planet</div>' : ''}
+        ${typeLabel}
         <div class="slider-group">
-          <div class="slider-label"><span>Mass</span><span class="slider-value" id="mass-val-${p.id}">${p.mass.toFixed(1)}</span></div>
-          <input type="range" min="0.1" max="79" step="0.1" value="${p.mass}"
-            oninput="updatePlanetMass('${p.id}',this.value)">
+          <div class="slider-label"><span>Mass</span><span class="slider-value" id="mass-val-${p.id}">${fmtPlanetMass(p.mass)}</span></div>
+          <input type="range" min="-7" max="1.9" step="0.01" value="${Math.log10(Math.max(1e-7, p.mass))}"
+            oninput="updatePlanetMass('${p.id}', Math.pow(10, parseFloat(this.value)))">
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Velocity</span><span class="slider-value" id="vel-val-${p.id}">${vmul.toFixed(2)}×</span></div>
@@ -3877,18 +4226,38 @@ function removeSun(id) {
   }
 }
 
+// Format a planet's mass for the slider readout. Real Sun:planet ratios span
+// 7+ orders of magnitude (Pluto ≈ 7e-6 → dwarf stars > 50), so the formatter
+// switches to scientific notation for very small values.
+function fmtPlanetMass(m) {
+  if (m >= 1)    return m.toFixed(2);
+  if (m >= 0.01) return m.toFixed(3);
+  return m.toExponential(2);
+}
+
+// Jupiter mass in sim units. Sun mass = 1000; Sun:Jupiter mass ratio ≈ 1047.35.
+const JUPITER_MASS_SIM = 1000 / 1047.35;
+// Planet spawner allowed mass band, in sim units.
+//   Min: 0.0000002514 × Sun mass = 2.514e-7 × 1000 = 2.514e-4 sim units (~Mars-class).
+//   Max: 8 × Jupiter mass                          ≈ 7.638 sim units (sub-deuterium-burning).
+const PLANET_MIN_MASS = 2.514e-7 * 1000;
+const PLANET_MAX_MASS = 8 * JUPITER_MASS_SIM;
+// Dwarf-planet (brown-dwarf-ish) band: 13–80 × Jupiter mass.
+const DWARF_PLANET_MIN_MASS = 13 * JUPITER_MASS_SIM;
+const DWARF_PLANET_MAX_MASS = 80 * JUPITER_MASS_SIM;
+
 function updatePlanetMass(id, v) {
   const p = bodies.find(b => b.id === id);
   if (p) {
     const wasDwarfStar = p.mass > 50;
-    const wasDwarfPlanet = p.mass < 1;
-    p.mass = parseFloat(v);
+    const wasDwarfPlanet = p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
+    p.mass = Math.max(1e-8, parseFloat(v));
     p.radius = 3 + Math.cbrt(p.mass) * 2.2;
     const el = document.getElementById('mass-val-' + id);
-    if (el) el.textContent = p.mass.toFixed(1);
+    if (el) el.textContent = fmtPlanetMass(p.mass);
     // Re-render controls when crossing the dwarf-star or dwarf-planet threshold
     const isDwarfStar = p.mass > 50;
-    const isDwarfPlanet = p.mass < 1;
+    const isDwarfPlanet = p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
     if (wasDwarfStar !== isDwarfStar || wasDwarfPlanet !== isDwarfPlanet) buildControls();
   }
 }
@@ -4031,12 +4400,21 @@ function showAddPlanetModal() {
   overlay.id = 'add-planet-overlay';
   overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:20000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)';
 
+  const logMin = Math.log10(PLANET_MIN_MASS);
+  const logMax = Math.log10(PLANET_MAX_MASS);
+  const defaultLog = (logMin + logMax) / 2;
+  const defaultMass = Math.pow(10, defaultLog);
   overlay.innerHTML = `
     <div style="background:linear-gradient(160deg,rgba(20,20,45,0.97),rgba(12,12,30,0.99));border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:28px;width:320px;box-shadow:0 20px 60px rgba(0,0,0,0.7);font-family:'Inter',sans-serif">
       <h3 style="margin:0 0 20px;color:#fff;font-size:1.15em;font-weight:700">✦ New Planet</h3>
       <div style="margin-bottom:14px">
         <label style="display:block;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Name</label>
         <input id="new-planet-name" type="text" value="${defaultName}" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-family:'Inter',sans-serif;font-size:0.95em;outline:none" />
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="display:flex;justify-content:space-between;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px"><span>Mass</span><span id="new-planet-mass-val" style="color:#bbb;font-variant-numeric:tabular-nums"></span></label>
+        <input id="new-planet-mass" type="range" min="${logMin}" max="${logMax}" step="0.01" value="${defaultLog}" style="width:100%;cursor:pointer" />
+        <div style="font-size:0.65em;color:#666;margin-top:3px">${fmtPlanetMass(PLANET_MIN_MASS)} → ${fmtPlanetMass(PLANET_MAX_MASS)} (2.514×10⁻⁷ M☉ → 8 M♃)</div>
       </div>
       <div style="margin-bottom:20px">
         <label style="display:block;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Color</label>
@@ -4062,6 +4440,16 @@ function showAddPlanetModal() {
     document.getElementById('new-planet-color-label').textContent = this.value;
   });
 
+  // Update mass readout live as the user drags the slider
+  const massInput = document.getElementById('new-planet-mass');
+  const massVal   = document.getElementById('new-planet-mass-val');
+  function refreshMassLabel() {
+    const m = Math.pow(10, parseFloat(massInput.value));
+    massVal.textContent = fmtPlanetMass(m);
+  }
+  massInput.addEventListener('input', refreshMassLabel);
+  refreshMassLabel();
+
   // Cancel
   document.getElementById('modal-cancel').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
@@ -4070,7 +4458,8 @@ function showAddPlanetModal() {
   document.getElementById('modal-create').addEventListener('click', () => {
     const name = nameInput.value.trim() || defaultName;
     const color = document.getElementById('new-planet-color').value;
-    spawnPlanet(name, color);
+    const mass = Math.pow(10, parseFloat(massInput.value));
+    spawnPlanet(name, color, mass);
     overlay.remove();
   });
 
@@ -4081,7 +4470,7 @@ function showAddPlanetModal() {
   });
 }
 
-function spawnPlanet(name, color) {
+function spawnPlanet(name, color, massOverride) {
   const sun = bodies.find(b => b.isSun);
   const cx = sun ? sun.x : canvas.clientWidth / 2;
   const cy = sun ? sun.y : canvas.clientHeight / 2;
@@ -4089,7 +4478,17 @@ function spawnPlanet(name, color) {
 
   const dist = 100 + Math.random() * 260;
   const angle = Math.random() * Math.PI * 2;
-  const mass = 0.5 + Math.random() * 10;
+  // Mass clamped to the planet spawner's allowed range
+  // [2.514e-7 × Sun, 8 × Jupiter]. If no explicit mass was passed, roll one
+  // log-uniformly inside the band so the slider's default still produces a
+  // varied mix of small/large planets.
+  const mass = massOverride != null
+    ? Math.max(PLANET_MIN_MASS, Math.min(PLANET_MAX_MASS, massOverride))
+    : (() => {
+        const logMin = Math.log10(PLANET_MIN_MASS);
+        const logMax = Math.log10(PLANET_MAX_MASS);
+        return Math.pow(10, logMin + Math.random() * (logMax - logMin));
+      })();
   const planetRadius = 3 + Math.cbrt(mass) * 2.2;
   // Find a free spot near the desired orbit point and re-derive orbital
   // velocity based on the actual distance from the sun after nudging.
@@ -4185,6 +4584,13 @@ function onCreatorMassInput(logVal) {
 }
 
 function createCustomBody() {
+  // Creator section is gated by login; the controls aren't even in the DOM
+  // unless the user has authenticated, but check defensively in case this is
+  // wired into something else.
+  if (!creatorAuthed) {
+    showCreatorLogin();
+    return;
+  }
   const type   = document.getElementById('creator-type').value;
   const name   = (document.getElementById('creator-name').value || '').trim();
   const logVal = parseFloat(document.getElementById('creator-mass').value);
@@ -4263,13 +4669,110 @@ function createCustomBody() {
   triggerMergeFlash();
 }
 
-// Live-update the color label whenever the picker changes.
-document.addEventListener('DOMContentLoaded', () => {
+// Render the Creator section: either a "login to unlock" prompt or the full
+// custom-body designer, depending on creatorAuthed. Called on init and any
+// time the auth state flips.
+function renderCreatorSection() {
+  const el = document.getElementById('creator-content');
+  if (!el) return;
+  if (!creatorAuthed) {
+    el.innerHTML = `
+      <div style="font-size:0.7em;color:#777;margin-bottom:10px;line-height:1.5">
+        Locked — sign in to design custom bodies with full control over type, mass, and color.
+      </div>
+      <div class="btn-row">
+        <button class="btn add-btn" onclick="showCreatorLogin()" style="flex:1">🔐 Creator Login</button>
+      </div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:0.7em;color:#6ee7a0;margin-bottom:8px">Signed in as Creator</div>
+    <div style="font-size:0.7em;color:#777;margin-bottom:10px;line-height:1.5">Design a custom body with full control over its type, mass, and color.</div>
+    <div class="slider-group">
+      <div class="slider-label"><span>Type</span></div>
+      <select id="creator-type" onchange="onCreatorTypeChange()" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none;cursor:pointer">
+        <option value="sun">☀ Sun (main sequence)</option>
+        <option value="redgiant">🔴 Red Giant</option>
+        <option value="planet">🪐 Planet</option>
+        <option value="moon">🌑 Moon</option>
+        <option value="dwarf">◐ Dwarf Star</option>
+        <option value="blackhole">🕳️ Black Hole</option>
+        <option value="neutron">💫 Neutron Star</option>
+      </select>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>Name</span></div>
+      <input id="creator-name" type="text" placeholder="Auto" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none" />
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>Mass</span><span class="slider-value" id="creator-mass-val">1000</span></div>
+      <input id="creator-mass" type="range" min="0" max="14" step="0.01" value="3" oninput="onCreatorMassInput(this.value)" />
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><span>Color</span></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input id="creator-color" type="color" value="#ffb347" style="width:40px;height:28px;border:none;border-radius:6px;cursor:pointer;background:transparent" />
+        <span id="creator-color-label" style="color:#aaa;font-size:0.75em;font-family:monospace">#ffb347</span>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn add-btn" onclick="createCustomBody()" style="flex:1" title="Spawn a body using the type, name, mass, and color set above.">✦ Create</button>
+      <button class="btn" onclick="creatorLogout()" title="Sign out of the Creator section">⎋</button>
+    </div>`;
+  // Re-bind the color picker live-update hook now that the input is in the DOM.
   const cc = document.getElementById('creator-color');
   if (cc) cc.addEventListener('input', () => {
-    document.getElementById('creator-color-label').textContent = cc.value;
+    const lbl = document.getElementById('creator-color-label');
+    if (lbl) lbl.textContent = cc.value;
   });
-});
+}
+
+function showCreatorLogin() {
+  if (document.getElementById('creator-login-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'creator-login-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:20000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)';
+  overlay.innerHTML = `
+    <div style="background:linear-gradient(160deg,rgba(20,20,45,0.97),rgba(12,12,30,0.99));border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:28px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,0.7);font-family:'Inter',sans-serif">
+      <h3 style="margin:0 0 18px;color:#fff;font-size:1.15em;font-weight:700">🔐 Creator Login</h3>
+      <div style="margin-bottom:18px">
+        <label style="display:block;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Password</label>
+        <input id="creator-password" type="password" autocomplete="off" placeholder="••••••••" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-family:'Inter',sans-serif;font-size:0.95em;outline:none" />
+        <div id="creator-login-error" style="display:none;color:#ff8888;font-size:0.78em;margin-top:6px">Incorrect password.</div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="creator-login-cancel" style="padding:8px 18px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#aaa;cursor:pointer;font-family:'Inter',sans-serif;font-size:0.85em">Cancel</button>
+        <button id="creator-login-submit" style="padding:8px 18px;border-radius:8px;border:1px solid rgba(110,231,160,0.3);background:rgba(110,231,160,0.12);color:#6ee7a0;cursor:pointer;font-family:'Inter',sans-serif;font-size:0.85em;font-weight:600">Unlock</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const passInput = document.getElementById('creator-password');
+  passInput.focus();
+  const close = () => overlay.remove();
+  const attempt = () => {
+    if ((passInput.value || '') === CREATOR_PASSWORD) {
+      creatorAuthed = true;
+      try { localStorage.setItem('creatorAuthed', '1'); } catch (_) {}
+      renderCreatorSection();
+      close();
+    } else {
+      document.getElementById('creator-login-error').style.display = 'block';
+    }
+  };
+  document.getElementById('creator-login-cancel').addEventListener('click', close);
+  document.getElementById('creator-login-submit').addEventListener('click', attempt);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  passInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') attempt();
+    if (e.key === 'Escape') close();
+  });
+}
+
+function creatorLogout() {
+  creatorAuthed = false;
+  try { localStorage.removeItem('creatorAuthed'); } catch (_) {}
+  renderCreatorSection();
+}
 
 function showAddMoonModal() {
   // Moons orbit planets, not stars — only planets are valid parents.
@@ -4379,6 +4882,23 @@ function togglePause() {
   const btn = document.getElementById('btn-pause');
   btn.textContent = paused ? '▶ Play' : '⏸ Pause';
   btn.classList.toggle('active', paused);
+}
+
+function toggleThreeD() {
+  is3D = !is3D;
+  const btn = document.getElementById('btn-3d');
+  if (btn) btn.classList.toggle('active', is3D);
+  if (is3D) {
+    // Default to a slight overhead tilt so the user immediately sees a 3D
+    // perspective instead of an unchanged top-down view.
+    if (cameraPitch === 0 && cameraYaw === 0) {
+      cameraPitch = -0.55;
+    }
+  } else {
+    // Reset camera angles so 2D doesn't carry over a rotated view.
+    cameraYaw = 0;
+    cameraPitch = 0;
+  }
 }
 
 function resetSim() {
@@ -4817,6 +5337,14 @@ try {
     adminAuthed = true;
     adminAuthedEmail = stored.toLowerCase();
   }
+} catch (_) {}
+
+// Creator login: a single shared password unlocks the custom-body Creator
+// section. Stored in localStorage so the unlock persists across reloads.
+const CREATOR_PASSWORD = 'asdfg';
+let creatorAuthed = false;
+try {
+  if (localStorage.getItem('creatorAuthed') === '1') creatorAuthed = true;
 } catch (_) {}
 
 function pickAdminSpawnPos(effectiveRadius) {
@@ -5524,6 +6052,27 @@ let panStartViewX = 0, panStartViewY = 0;
 
 function recenterView() {
   autoFollow = true;
+  // Zoom to fit the most distant non-galaxy body (with margin) so the AU-scale
+  // solar system is visible by default. Falls back to 1× when there's nothing
+  // to fit (e.g. fresh empty scene).
+  const cnv = document.getElementById('sim');
+  const w = cnv ? cnv.clientWidth : 0;
+  const h = cnv ? cnv.clientHeight : 0;
+  const suns = bodies.filter(b => b.isSun);
+  if (suns.length > 0 && bodies.length > 1 && w > 0 && h > 0) {
+    const primarySun = suns.reduce((a, b) => a.mass >= b.mass ? a : b);
+    let maxDist = 0;
+    for (const b of bodies) {
+      if (b === primarySun) continue;
+      const dx = b.x - primarySun.x, dy = b.y - primarySun.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > maxDist) maxDist = d;
+    }
+    if (maxDist > 0) {
+      viewZoom = Math.max(1e-30, Math.min(Number.MAX_SAFE_INTEGER, (Math.min(w, h) * 0.45) / maxDist));
+      return;
+    }
+  }
   viewZoom = 1;
 }
 
@@ -5538,13 +6087,31 @@ function fitCameraToObject(x, y, radius) {
   if (!w || !h || !radius) return;
   // Aim for the diameter to occupy ~80% of the smaller viewport dimension.
   const targetZoom = (Math.min(w, h) * 0.8) / (radius * 2);
-  viewZoom = Math.max(1e-30, Math.min(8, targetZoom));
+  viewZoom = Math.max(1e-30, Math.min(Number.MAX_SAFE_INTEGER, targetZoom));
   viewX = x;
   viewY = y;
   autoFollow = false;
 }
 
 function findBodyAtScreen(sx, sy) {
+  const rect = canvas.getBoundingClientRect();
+  const mx = sx - rect.left, my = sy - rect.top;
+  if (is3D) {
+    // Hit-test in screen space using the per-body projected position.
+    let closest = null;
+    let closestDist = Infinity;
+    for (const b of bodies) {
+      const proj = project3DScreen(b.x, b.y, b.z || 0);
+      const dx = proj.sx - mx, dy = proj.sy - my;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const hitRadius = Math.max(b.radius * proj.scale + 10, 18);
+      if (dist < hitRadius && dist < closestDist) {
+        closest = b;
+        closestDist = dist;
+      }
+    }
+    return closest;
+  }
   const p = screenToWorld(sx, sy);
   // Hit radius is screen-space (so it stays clickable at any zoom)
   const padScreen = 10 / viewZoom;
@@ -5574,8 +6141,15 @@ function findGalaxyAtScreen(sx, sy) {
   let closestDist = Infinity;
   for (const g of galaxies) {
     if (g.type !== 'universe' && g.type !== 'laniakea') continue;
-    const screenX = (g.x - viewX) * viewZoom + w / 2;
-    const screenY = (g.y - viewY) * viewZoom + h / 2;
+    let screenX, screenY;
+    if (is3D) {
+      const proj = project3DScreen(g.x, g.y, 0);
+      screenX = proj.sx;
+      screenY = proj.sy;
+    } else {
+      screenX = (g.x - viewX) * viewZoom + w / 2;
+      screenY = (g.y - viewY) * viewZoom + h / 2;
+    }
     const dx = sx - screenX, dy = sy - screenY;
     const d = Math.sqrt(dx * dx + dy * dy);
     if (d < HIT_RADIUS && d < closestDist) {
@@ -5588,6 +6162,19 @@ function findGalaxyAtScreen(sx, sy) {
 
 function findArrowTipAtScreen(sx, sy) {
   if (!showVectors) return null;
+  if (is3D) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = sx - rect.left, my = sy - rect.top;
+    for (const b of bodies) {
+      const tipWX = b.x + b.vx * VEL_ARROW_SCALE;
+      const tipWY = b.y + b.vy * VEL_ARROW_SCALE;
+      const tipWZ = (b.z || 0) + (b.vz || 0) * VEL_ARROW_SCALE;
+      const proj = project3DScreen(tipWX, tipWY, tipWZ);
+      const dx = proj.sx - mx, dy = proj.sy - my;
+      if (Math.sqrt(dx * dx + dy * dy) < 12) return b;
+    }
+    return null;
+  }
   const p = screenToWorld(sx, sy);
   const hitRadius = 10 / viewZoom;
   for (const b of bodies) {
@@ -5599,7 +6186,29 @@ function findArrowTipAtScreen(sx, sy) {
   return null;
 }
 
+// 3D camera rotation drag state
+let rotating3D = false;
+let rotateStartX = 0, rotateStartY = 0;
+let rotateStartYaw = 0, rotateStartPitch = 0;
+
+canvas.addEventListener('contextmenu', function(e) {
+  // Suppress the context menu so right-click can be used for 3D camera rotation
+  if (is3D) e.preventDefault();
+});
+
 canvas.addEventListener('mousedown', function(e) {
+  // 3D rotation: right-click drag, or Shift + left-click drag on empty space.
+  if (is3D && (e.button === 2 || (e.button === 0 && e.shiftKey))) {
+    rotating3D = true;
+    rotateStartX = e.clientX;
+    rotateStartY = e.clientY;
+    rotateStartYaw = cameraYaw;
+    rotateStartPitch = cameraPitch;
+    canvas.style.cursor = 'move';
+    e.preventDefault();
+    return;
+  }
+
   // Check arrow tips first
   const arrowBody = findArrowTipAtScreen(e.clientX, e.clientY);
   if (arrowBody) {
@@ -5646,9 +6255,10 @@ canvas.addEventListener('mousedown', function(e) {
 canvas.addEventListener('wheel', function(e) {
   e.preventDefault();
   const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-  // No practical lower bound on zoom-out — just a tiny floor to avoid
-  // division-by-zero in transforms that use 1 / viewZoom.
-  const newZoom = Math.max(1e-30, Math.min(8, viewZoom * factor));
+  // No upper or lower bound on zoom — only floor at a tiny positive value so
+  // 1 / viewZoom transforms don't blow up, and cap at MAX_SAFE_INTEGER so
+  // pathological scroll bursts don't overflow.
+  const newZoom = Math.max(1e-30, Math.min(Number.MAX_SAFE_INTEGER, viewZoom * factor));
   if (newZoom === viewZoom) return;
 
   // Keep the world point under the mouse fixed during zoom
@@ -5661,6 +6271,20 @@ canvas.addEventListener('wheel', function(e) {
 }, { passive: false });
 
 canvas.addEventListener('mousemove', function(e) {
+  // 3D rotation drag: ~0.6 radians per full canvas width.
+  if (rotating3D) {
+    const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
+    const dxs = e.clientX - rotateStartX;
+    const dys = e.clientY - rotateStartY;
+    cameraYaw = rotateStartYaw + (dxs / w) * Math.PI;
+    cameraPitch = rotateStartPitch + (dys / h) * Math.PI;
+    // Clamp pitch so users can't flip the camera fully upside down (gets disorienting)
+    const PITCH_LIMIT = Math.PI / 2 - 0.05;
+    if (cameraPitch > PITCH_LIMIT) cameraPitch = PITCH_LIMIT;
+    if (cameraPitch < -PITCH_LIMIT) cameraPitch = -PITCH_LIMIT;
+    return;
+  }
+
   // Pan: drag the view itself
   if (panning) {
     const dxs = e.clientX - panStartX;
@@ -5734,6 +6358,11 @@ canvas.addEventListener('mousemove', function(e) {
 });
 
 canvas.addEventListener('mouseup', function(e) {
+  if (rotating3D) {
+    rotating3D = false;
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
   if (panning) {
     panning = false;
     canvas.style.cursor = 'crosshair';
@@ -5779,6 +6408,9 @@ canvas.addEventListener('mouseup', function(e) {
 
 // Cancel drag if mouse leaves canvas
 canvas.addEventListener('mouseleave', function() {
+  if (rotating3D) {
+    rotating3D = false;
+  }
   if (panning) {
     panning = false;
   }
@@ -5857,7 +6489,8 @@ function escapeHtml(s) {
 function updateEquation(bodyA, bodyB) {
   if (!bodyA || !bodyB || bodyA === bodyB) { clearEquation(); return; }
   const dx = bodyB.x - bodyA.x, dy = bodyB.y - bodyA.y;
-  const r = Math.sqrt(dx * dx + dy * dy);
+  const dz = (bodyB.z || 0) - (bodyA.z || 0);
+  const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
   if (r <= 0) { clearEquation(); return; }
   // Textbook form so the rendered equation balances. (The simulator adds a
   // small softening term internally for stability; at normal separations it
@@ -5872,7 +6505,7 @@ function updateEquation(bodyA, bodyB) {
   // 120 ms debounce meant the result never appeared while running.
   el.innerHTML =
     `<span style="color:#34d399;font-weight:600">${fmtEq(force)}</span>` +
-    ` = ${G_BASE} · ` +
+    ` = ${fmtEq(G_BASE)} · ` +
     `${fmtEq(bodyA.mass)}<span style="color:#777"> (${escapeHtml(bodyA.name)})</span> · ` +
     `${fmtEq(bodyB.mass)}<span style="color:#777"> (${escapeHtml(bodyB.name)})</span>` +
     ` / ${fmtEq(r)}<sup>2</sup>`;
@@ -5889,6 +6522,7 @@ function clearEquation() {
 document.getElementById('btn-trails').classList.add('active');
 renderAdminSection();
 renderSaveSection();
+renderCreatorSection();
 requestAnimationFrame(function firstFrame(t) {
   if (needsInit) {
     resize();
@@ -5896,6 +6530,9 @@ requestAnimationFrame(function firstFrame(t) {
     initialState = deepCopy(bodies);
     buildControls();
     needsInit = false;
+    // AU-scale orbits put Earth ~145k units from the sun — start zoomed out
+    // so the solar system is visible on first paint.
+    recenterView();
   }
   loop(t);
 });

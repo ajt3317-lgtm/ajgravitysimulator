@@ -116,7 +116,7 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
           <div id="eq-values" style="opacity:0.4;color:#555;margin-left:4px">Select two bodies to see values</div>
         </div>
       </div>
-      <div id="eq-legend"><span style="color:#a78bfa">F</span> = gravitational force &nbsp;&middot;&nbsp; <span style="color:#a78bfa">G</span> = 0.5 (sim units; real value 6.674 &times; 10<sup>&minus;11</sup> N&middot;m&sup2;/kg&sup2;) &nbsp;&middot;&nbsp; <span style="color:#a78bfa">m&#x2081;, m&#x2082;</span> = masses of two bodies &nbsp;&middot;&nbsp; <span style="color:#a78bfa">r</span> = distance between them</div>
+      <div id="eq-legend"><span style="color:#a78bfa">F</span> = gravitational force &nbsp;&middot;&nbsp; <span style="color:#a78bfa">G</span> tuned so Earth orbits the Sun in 1 sim year (real value 6.674 &times; 10<sup>&minus;11</sup> N&middot;m&sup2;/kg&sup2;) &nbsp;&middot;&nbsp; <span style="color:#a78bfa">m&#x2081;, m&#x2082;</span> = masses of two bodies &nbsp;&middot;&nbsp; <span style="color:#a78bfa">r</span> = distance between them</div>
     </div>
   </div>
   <div id="panel">
@@ -135,10 +135,12 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
           <button class="btn active" id="btn-afterlife" onclick="toggleStarAfterlife()" title="Toggle stellar evolution. When on, stars age, become red giants / supernovae / black holes, etc. When off, stars stay frozen on the main sequence forever.">☠ Afterlife</button>
           <button class="btn" id="btn-faces" onclick="toggleFaces()" title="Show or hide cartoon faces on every star, planet, and moon. Mood depends on the body's evolutionary state.">☺ Faces</button>
           <button class="btn" id="btn-recenter" onclick="recenterView()" title="Snap the camera back to follow the primary sun and reset zoom to 1×. Use this if you panned/zoomed and lost the scene.">⌖ Recenter</button>
+          <button class="btn" id="btn-3d" onclick="toggleThreeD()" title="Toggle 3D mode. In 3D, bodies have a z-axis and the camera can be tilted/rotated with right-click drag (or Shift + drag). The default solar system orbits in the z=0 plane until you give bodies vertical motion.">🌐 3D</button>
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Speed</span><span class="slider-value" id="speed-val">1.00×</span></div>
-          <input type="range" id="speed-slider" min="-0.6" max="4" step="0.01" value="0" oninput="setSpeedLog(this.value)" title="Time multiplier. Left = slow motion (0.25×), right = fast-forward up to 10,000×. Higher speeds age stars dramatically faster.">
+          <input type="range" id="speed-slider" min="-0.6" max="4" step="0.01" value="0" oninput="setSpeedLog(this.value)" title="Time multiplier. 1× = 1 simulated month per real second. Left = slow motion (0.25×), right = fast-forward up to 10,000× (≈833 yr/sec).">
+          <div style="font-size:0.65em;color:#666;margin-top:2px">1× = 1 month / real second</div>
         </div>
       </div>
 
@@ -159,39 +161,9 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
         <div id="planet-controls"></div>
       </div>
 
-      <div class="section">
+      <div class="section" id="creator-section">
         <div class="section-title">Creator</div>
-        <div style="font-size:0.7em;color:#777;margin-bottom:10px;line-height:1.5">Design a custom body with full control over its type, mass, and color.</div>
-        <div class="slider-group">
-          <div class="slider-label"><span>Type</span></div>
-          <select id="creator-type" onchange="onCreatorTypeChange()" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none;cursor:pointer">
-            <option value="sun">☀ Sun (main sequence)</option>
-            <option value="redgiant">🔴 Red Giant</option>
-            <option value="planet">🪐 Planet</option>
-            <option value="moon">🌑 Moon</option>
-            <option value="dwarf">◐ Dwarf Star</option>
-            <option value="blackhole">🕳️ Black Hole</option>
-            <option value="neutron">💫 Neutron Star</option>
-          </select>
-        </div>
-        <div class="slider-group">
-          <div class="slider-label"><span>Name</span></div>
-          <input id="creator-name" type="text" placeholder="Auto" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#ccc;padding:6px 8px;font-family:'Inter',sans-serif;font-size:0.85em;outline:none" />
-        </div>
-        <div class="slider-group">
-          <div class="slider-label"><span>Mass</span><span class="slider-value" id="creator-mass-val">1000</span></div>
-          <input id="creator-mass" type="range" min="0" max="14" step="0.01" value="3" oninput="onCreatorMassInput(this.value)" />
-        </div>
-        <div class="slider-group">
-          <div class="slider-label"><span>Color</span></div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <input id="creator-color" type="color" value="#ffb347" style="width:40px;height:28px;border:none;border-radius:6px;cursor:pointer;background:transparent" />
-            <span id="creator-color-label" style="color:#aaa;font-size:0.75em;font-family:monospace">#ffb347</span>
-          </div>
-        </div>
-        <div class="btn-row">
-          <button class="btn add-btn" onclick="createCustomBody()" style="flex:1" title="Spawn a body using the type, name, mass, and color set above.">✦ Create</button>
-        </div>
+        <div id="creator-content"></div>
       </div>
 
       <div class="section" id="save-section">
