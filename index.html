@@ -131,16 +131,31 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
           <button class="btn" id="btn-pause" onclick="togglePause()" title="Pause or resume the simulation. Physics, stellar evolution, and animations all freeze while paused.">⏸ Pause</button>
           <button class="btn reset-btn" id="btn-reset" onclick="resetSim()" title="Wipe everything and start fresh with the default sun + planets. You'll lose any unsaved bodies, galaxies, and admin-spawned objects.">↺ Reset</button>
           <button class="btn" id="btn-trails" onclick="toggleTrails()" title="Show or hide the colored motion trails behind each body. Useful for visualizing orbits; turn off for cleaner snapshots.">◌ Trails</button>
+          <button class="btn" id="btn-asteroid-trails" onclick="toggleAsteroidTrails()" title="Opt-in: also record + draw trails for asteroids. Off by default because 200+ trails are heavy.">☄ Asteroid Trails</button>
           <button class="btn" id="btn-vectors" onclick="toggleVectors()" title="Show velocity arrows on every body. Drag an arrow tip to change a body's speed and direction.">➤ Vectors</button>
           <button class="btn active" id="btn-afterlife" onclick="toggleStarAfterlife()" title="Toggle stellar evolution. When on, stars age, become red giants / supernovae / black holes, etc. When off, stars stay frozen on the main sequence forever.">☠ Afterlife</button>
           <button class="btn" id="btn-faces" onclick="toggleFaces()" title="Show or hide cartoon faces on every star, planet, and moon. Mood depends on the body's evolutionary state.">☺ Faces</button>
+          <button class="btn" id="btn-realistic" onclick="toggleRealisticMode()" title="Render the Sun and any planet named Mercury / Venus / Earth / Mars / Jupiter / Saturn / Uranus / Neptune / Pluto with a textured, photo-inspired look. Rename a body to one of those names to apply it.">🌍 Realistic</button>
           <button class="btn" id="btn-recenter" onclick="recenterView()" title="Snap the camera back to follow the primary sun and reset zoom to 1×. Use this if you panned/zoomed and lost the scene.">⌖ Recenter</button>
           <button class="btn" id="btn-3d" onclick="toggleThreeD()" title="Toggle 3D mode. In 3D, bodies have a z-axis and the camera can be tilted/rotated with right-click drag (or Shift + drag). The default solar system orbits in the z=0 plane until you give bodies vertical motion.">🌐 3D</button>
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Speed</span><span class="slider-value" id="speed-val">1.00×</span></div>
-          <input type="range" id="speed-slider" min="-0.6" max="4" step="0.01" value="0" oninput="setSpeedLog(this.value)" title="Time multiplier. 1× = 1 simulated month per real second. Left = slow motion (0.25×), right = fast-forward up to 10,000× (≈833 yr/sec).">
-          <div style="font-size:0.65em;color:#666;margin-top:2px">1× = 1 month / real second</div>
+          <input type="range" id="speed-slider" min="-0.6" max="11" step="0.01" value="0" oninput="setSpeedLog(this.value)" title="Time multiplier. 1× = 1 simulated month per real second. Left = slow motion (0.25×), right = fast-forward up to 100,000,000,000× (≈8.3 billion years/sec).">
+          <div style="font-size:0.65em;color:#666;margin-top:2px">1× = 1 month / real second &middot; max 100,000,000,000×</div>
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Size Exaggeration</span><span class="slider-value" id="size-exag-val">1.00×</span></div>
+          <input type="range" id="size-exag-slider" min="0" max="6" step="0.01" value="0" oninput="setSizeExaggerationLog(this.value)" title="Visual size multiplier for every body. Real planets at AU scale are sub-pixel; bump this to see them. Mass and physics are unchanged — only the displayed radius scales.">
+          <div style="font-size:0.65em;color:#666;margin-top:2px">Visual size only &middot; 1× → 1,000,000× &middot; physics unchanged</div>
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Tilt</span><span class="slider-value" id="tilt-val">0°</span></div>
+          <input type="range" id="tilt-slider" min="-85" max="85" step="1" value="0" oninput="setCameraTiltDeg(this.value)" title="Pitch the camera up or down. Setting any tilt automatically enables 3D mode so the scene renders with perspective.">
+        </div>
+        <div class="slider-group">
+          <div class="slider-label"><span>Rotate</span><span class="slider-value" id="yaw-val">0°</span></div>
+          <input type="range" id="yaw-slider" min="-180" max="180" step="1" value="0" oninput="setCameraYawDeg(this.value)" title="Rotate the camera left/right around the vertical axis. Auto-enables 3D mode.">
         </div>
       </div>
 
@@ -157,6 +172,10 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
         <div class="btn-row">
           <button class="btn add-btn" onclick="addPlanet()" title="Spawn a planet orbiting a nearby sun. Mass 0.1–50 = planet, 50–79 = dwarf star. Merge enough dwarf stars together (>79) and a real star ignites.">+ Add Planet</button>
           <button class="btn add-btn" onclick="addMoon()" title="Spawn a small moon around a nearby planet. Moons inherit their parent's orbit and add a second tier of gravitational interaction.">🌑 Add Moon</button>
+          <button class="btn add-btn" onclick="addAsteroidBelt()" title="Spawn 200 tiny rocks in a belt between 2.2 and 3.2 AU from the primary sun. They're nearly massless, don't get trails, and are hidden from the body list to keep things uncluttered.">☄ Add Asteroid Belt</button>
+          <button class="btn reset-btn" onclick="removeAsteroidBelt()" title="Remove every asteroid currently in the scene. Suns, planets, and moons are kept.">✕ Remove Asteroids</button>
+          <button class="btn add-btn" onclick="addComet()" title="Spawn a single comet on an eccentric oval orbit. Mass 5×10⁹–5×10¹² kg, body 0.5–10 km, tail 1 AU pointing away from the nearest sun.">☄ Spawn Comet</button>
+          <button class="btn reset-btn" onclick="removeComets()" title="Remove every comet currently in the scene.">✕ Remove Comets</button>
         </div>
         <div id="planet-controls"></div>
       </div>

@@ -15,10 +15,14 @@ const ctx = canvas.getContext('2d');
 let G_BASE = 0.5;
 const SOFTENING = 4;
 // Trail length in physics-step samples. Earth at 1 AU records ~1440 samples per
-// orbit (720 physics-dt × 2 steps/dt) so 10000 covers ~7 full Earth orbits at
+// orbit (720 physics-dt × 2 steps/dt) so 8000 covers ~5 full Earth orbits at
 // any time-warp setting (trail fill rate scales with speed, so it doesn't change
 // what fraction of an orbit is visible).
-const TRAIL_LEN = 10000;
+const TRAIL_LEN = 8000;
+// How many trail points to actually render per body. 1 = draw every sample
+// (smoothest, but more line segments). The expensive part was the old per-step
+// .shift() — with that gone, rendering every sample is cheap enough.
+const TRAIL_RENDER_STRIDE = 1;
 const STAR_COUNT = 160;
 // Rendering resolution cap. Many displays advertise DPR 2-3, which means the
 // canvas internally rasterizes 4-9× as many pixels per frame. Capping at 1.5
@@ -41,6 +45,8 @@ let facesEnabled = false;
 let speedMul = 1;
 let nextPlanetId = 1;
 let nextSunId = 1;
+let nextAsteroidId = 1;
+let nextCometId = 1;
 let frameCount = 0;
 let lastFpsTime = performance.now();
 let fps = 60;
@@ -50,6 +56,9 @@ let selectedBodyBId = null;
 let simTime = 0;       // accumulated simulation time in ms
 let lastLoopTime = 0;  // last frame timestamp for dt calculation
 let animTime = 0;      // monotonic time fed to draw functions; frozen on pause
+let sizeExaggeration = 1;  // visual-only radius multiplier (does NOT affect mass/physics/collision)
+let asteroidTrailsEnabled = false; // optional opt-in: record trails for asteroids too (perf-heavy)
+let realisticMode = false; // when on, planets named Mercury/Venus/Earth/.../Pluto + Sun get textured rendering
 
 // ---- Planet color palette ----
 const PALETTE = [
@@ -66,17 +75,23 @@ const PALETTE = [
 const _AU_IN_EARTH_DIAMETERS = 11727.399231907132727670392677483;
 const _EARTH_RADIUS_BASE = 3 + Math.cbrt(3) * 2.2;
 const _EARTH_DIAMETER_BASE = _EARTH_RADIUS_BASE * 2;
-const _AU_SIM_UNITS = _AU_IN_EARTH_DIAMETERS * _EARTH_DIAMETER_BASE;
-const SGR_A_RADIUS = 39.48 * _AU_SIM_UNITS; // ≈ 5.72 million sim units
-const NAMED_BHS = {
-  'sagittarius a': { mass: 1e15,   radius: SGR_A_RADIUS                 },
-  'ton 618':       { mass: 6.6e13, radius: SGR_A_RADIUS * 27000         },
-  // Phoenix A: Sgr A mass, 51 11/39 % bigger than TON 618 (= ×59/39)
-  'phoenix a':     { mass: 1e15,   radius: SGR_A_RADIUS * 27000 * 59/39 },
-  // M31* — Andromeda's central black hole; 25× Sagittarius A's radius.
-  // Mass scales with the real M31*/Sgr A solar-mass ratio (~35×).
-  'm31*':          { mass: 3.5e16, radius: SGR_A_RADIUS * 25            }
-};
+// AU and the named-BH radii are mutable so the admin can rescale the whole
+// simulation. NAMED_BHS gets rebuilt by rebuildAuDerived() whenever AU changes.
+let _AU_SIM_UNITS = _AU_IN_EARTH_DIAMETERS * _EARTH_DIAMETER_BASE;
+let SGR_A_RADIUS  = 39.48 * _AU_SIM_UNITS; // ≈ 5.72 million sim units
+let NAMED_BHS = {};
+function rebuildNamedBhs() {
+  NAMED_BHS = {
+    'sagittarius a': { mass: 1e15,   radius: SGR_A_RADIUS                 },
+    'ton 618':       { mass: 6.6e13, radius: SGR_A_RADIUS * 27000         },
+    // Phoenix A: Sgr A mass, 51 11/39 % bigger than TON 618 (= ×59/39)
+    'phoenix a':     { mass: 1e15,   radius: SGR_A_RADIUS * 27000 * 59/39 },
+    // M31* — Andromeda's central black hole; 25× Sagittarius A's radius.
+    // Mass scales with the real M31*/Sgr A solar-mass ratio (~35×).
+    'm31*':          { mass: 3.5e16, radius: SGR_A_RADIUS * 25            }
+  };
+}
+rebuildNamedBhs();
 
 // ---- Orbital tuning ----
 // We want Earth (at 1 AU around the Sun = 1000 sim mass) to complete one orbit
@@ -88,7 +103,38 @@ const NAMED_BHS = {
 // because their orbital radii are real AU multiples.
 const _EARTH_ORBIT_PERIOD_DT = 720;
 const _SUN_MASS_SIM = 1000;
-G_BASE = ((2 * Math.PI) / _EARTH_ORBIT_PERIOD_DT) ** 2 * Math.pow(_AU_SIM_UNITS, 3) / _SUN_MASS_SIM;
+function recomputeGBase() {
+  G_BASE = ((2 * Math.PI) / _EARTH_ORBIT_PERIOD_DT) ** 2 * Math.pow(_AU_SIM_UNITS, 3) / _SUN_MASS_SIM;
+}
+recomputeGBase();
+
+// Rescale the whole simulation when the admin changes the AU constant. The
+// scale factor k multiplies positions, velocities, radii (so visual size
+// keeps up with the new distances), and trail samples. G_BASE is recomputed
+// from the new AU so orbital periods stay the same in sim months — orbits
+// look the same on screen, just at a different sim-unit scale.
+function setAuMultiplier(k) {
+  if (!isFinite(k) || k <= 0) return;
+  const oldAU = _AU_SIM_UNITS;
+  _AU_SIM_UNITS = _AU_SIM_UNITS * k;
+  SGR_A_RADIUS  = 39.48 * _AU_SIM_UNITS;
+  rebuildNamedBhs();
+  recomputeGBase();
+  // Velocity has to scale linearly with k (not 1/sqrt) because G also scales
+  // as k³ — combined that keeps v_circular = sqrt(G·M/r) proportional to k.
+  for (const b of bodies) {
+    b.x  *= k; b.y  *= k; if (b.z !== undefined) b.z *= k;
+    b.vx *= k; b.vy *= k; if (b.vz !== undefined) b.vz *= k;
+    b.radius *= k;
+    if (b.trail) {
+      for (const p of b.trail) { p.x *= k; p.y *= k; if (p.z !== undefined) p.z *= k; }
+    }
+  }
+  // Camera follow point + zoom — keep the view roughly the same on screen.
+  viewX *= k; viewY *= k;
+  viewZoom /= k;
+  if (typeof render === 'function') {/* nothing to do — next frame redraws */}
+}
 
 // Real-world planet/Sun radius ratios. Multiplied by the Sun's sim radius (28)
 // to give each default planet its true relative size — Earth ends up ≈ 0.26
@@ -212,8 +258,16 @@ function computeAccel(bodies) {
   for (let i = 0; i < n; i++) {
     const bi = bodies[i];
     const zi = bi.z || 0;
+    const biAst = bi.isAsteroid;
+    const biComet = bi.isComet;
     for (let j = i + 1; j < n; j++) {
       const bj = bodies[j];
+      // Tiny-body pairs (asteroid↔asteroid, comet↔comet, comet↔asteroid) are
+      // skipped — both bodies are essentially massless, so the mutual pull is
+      // unobservable and dropping these pairs takes the inner loop from O(N²)
+      // back to O(N · planets+suns). With 500 asteroids that's a ~25× speedup.
+      const bjAst = bj.isAsteroid, bjComet = bj.isComet;
+      if ((biAst || biComet) && (bjAst || bjComet)) continue;
       const dx = bj.x - bi.x;
       const dy = bj.y - bi.y;
       const dz = (bj.z || 0) - zi;
@@ -263,11 +317,20 @@ function step(dt) {
     bodies[i].vz += a2.az[i] * dt * 0.5;
   }
 
-  // Record trails (locked bodies aren't moving so we skip them)
+  // Record trails (locked bodies aren't moving so we skip them).
+  // We push every step but only trim when the array grows past 2× the cap —
+  // amortized O(1) per push instead of the O(n) per-step .shift() the loop
+  // used to do, which became a major cost at high time-warp where step() runs
+  // 100×/frame. Asteroids are skipped by default — hundreds of trails would
+  // cost both memory and per-frame stroke time — but can be opted in via
+  // the Asteroid Trails toggle.
   for (const b of bodies) {
     if (b.locked) continue;
+    if (b.isAsteroid && !asteroidTrailsEnabled) continue;
     b.trail.push({ x: b.x, y: b.y, z: b.z || 0 });
-    if (b.trail.length > TRAIL_LEN) b.trail.shift();
+    if (b.trail.length > TRAIL_LEN * 2) {
+      b.trail = b.trail.slice(b.trail.length - TRAIL_LEN);
+    }
   }
 
   // Collision detection & merging
@@ -278,8 +341,13 @@ function checkCollisions() {
   const toRemove = new Set();
   for (let i = 0; i < bodies.length; i++) {
     if (toRemove.has(i)) continue;
+    const biAst = bodies[i].isAsteroid || bodies[i].isComet;
     for (let j = i + 1; j < bodies.length; j++) {
       if (toRemove.has(j)) continue;
+      // Same optimisation as in computeAccel — drop tiny-body pair checks
+      // (asteroid↔asteroid, comet↔comet, comet↔asteroid). They dominated
+      // the per-step cost and have no visible effect.
+      if (biAst && (bodies[j].isAsteroid || bodies[j].isComet)) continue;
       const dx = bodies[j].x - bodies[i].x;
       const dy = bodies[j].y - bodies[i].y;
       const dz = (bodies[j].z || 0) - (bodies[i].z || 0);
@@ -870,6 +938,549 @@ function updateBetelgeuseRadii() {
     b.radius = baseRadius * mul;
     b.color = BETELGEUSE_COLOR;
   }
+}
+
+// =====================================================================
+// Realistic-mode renderers
+// =====================================================================
+// When `realisticMode` is on, any body named after a real solar-system
+// object gets a textured, photo-inspired rendering instead of the default
+// cartoon-with-face look. Features (craters, swirls, etc.) are randomized
+// once and cached on the body so frame-to-frame they don't twinkle.
+
+const REALISTIC_NAMES = new Set([
+  'sun', 'mercury', 'venus', 'earth', 'mars',
+  'jupiter', 'saturn', 'uranus', 'neptune', 'pluto'
+]);
+
+function _seedFeatures(b, name) {
+  if (b._realFeatName === name && b._realFeat) return b._realFeat;
+  b._realFeatName = name;
+  const rng = () => Math.random();
+  const f = {};
+  if (name === 'mercury') {
+    f.craters = [];
+    for (let i = 0; i < 24; i++) f.craters.push({
+      ang: rng() * Math.PI * 2,
+      dist: rng() * 0.88,
+      size: 0.04 + rng() * 0.10,
+      darkness: 0.18 + rng() * 0.28
+    });
+  } else if (name === 'venus') {
+    f.swirls = [];
+    for (let i = 0; i < 7; i++) f.swirls.push({
+      yFrac: -0.7 + (i / 6) * 1.4,
+      phase: rng() * Math.PI * 2,
+      amp: 0.06 + rng() * 0.10,
+      thick: 0.08 + rng() * 0.10
+    });
+  } else if (name === 'mars') {
+    f.patches = [];
+    for (let i = 0; i < 12; i++) f.patches.push({
+      ang: rng() * Math.PI * 2,
+      dist: rng() * 0.7,
+      size: 0.10 + rng() * 0.16,
+      darkness: 0.12 + rng() * 0.22
+    });
+  } else if (name === 'jupiter') {
+    f.bands = [
+      { y: -0.85, w: 0.10, c: '#cdb088' },
+      { y: -0.65, w: 0.14, c: '#a8845c' },
+      { y: -0.42, w: 0.16, c: '#e2cda4' },
+      { y: -0.18, w: 0.14, c: '#9c7448' },
+      { y:  0.08, w: 0.16, c: '#dbc69a' },
+      { y:  0.33, w: 0.14, c: '#a8845c' },
+      { y:  0.58, w: 0.16, c: '#e2cda4' },
+      { y:  0.83, w: 0.10, c: '#8e6840' }
+    ];
+  } else if (name === 'saturn') {
+    f.bands = [
+      { y: -0.80, w: 0.16, c: '#e8d090' },
+      { y: -0.45, w: 0.20, c: '#d0b070' },
+      { y: -0.10, w: 0.20, c: '#e8d090' },
+      { y:  0.25, w: 0.20, c: '#c8a868' },
+      { y:  0.60, w: 0.18, c: '#dec078' },
+      { y:  0.88, w: 0.10, c: '#a88858' }
+    ];
+  } else if (name === 'uranus') {
+    f.bands = [
+      { y: -0.55, w: 0.20, c: '#bbe4e1' },
+      { y:  0.15, w: 0.30, c: '#9ed3ce' }
+    ];
+  } else if (name === 'neptune') {
+    f.wisps = [];
+    for (let i = 0; i < 7; i++) f.wisps.push({
+      xFrac: -0.7 + rng() * 1.4,
+      yFrac: -0.6 + rng() * 1.2,
+      w: 0.25 + rng() * 0.30,
+      thick: 0.04 + rng() * 0.05,
+      opacity: 0.22 + rng() * 0.28
+    });
+    f.spot = { x: -0.05, y: 0.10, w: 0.32, h: 0.16 };
+  } else if (name === 'sun') {
+    // Cumulus-cloud mottling: a mix of broad shadow swirls and bright
+    // highlight patches at random positions. Sizes are stratified into two
+    // layers so the eye reads "big puffy shapes overlaid with fine granules".
+    f.cells = [];
+    // Broad cells
+    for (let i = 0; i < 22; i++) f.cells.push({
+      ang: rng() * Math.PI * 2,
+      dist: rng() * 0.92,
+      size: 0.18 + rng() * 0.22,
+      type: rng() < 0.55 ? 'dark' : 'bright',
+      intensity: 0.18 + rng() * 0.30
+    });
+    // Fine granules
+    for (let i = 0; i < 50; i++) f.cells.push({
+      ang: rng() * Math.PI * 2,
+      dist: rng() * 0.95,
+      size: 0.04 + rng() * 0.10,
+      type: rng() < 0.45 ? 'dark' : 'bright',
+      intensity: 0.15 + rng() * 0.35
+    });
+  }
+  b._realFeat = f;
+  return f;
+}
+
+function _clipDisc(b, r) {
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+  ctx.clip();
+}
+
+function _limbShade(b, r) {
+  const g = ctx.createRadialGradient(b.x - r * 0.4, b.y - r * 0.4, 0, b.x, b.y, r);
+  g.addColorStop(0,   'rgba(255,255,255,0.28)');
+  g.addColorStop(0.7, 'rgba(255,255,255,0)');
+  g.addColorStop(1,   'rgba(0,0,0,0.55)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawRealisticMercury(b, r) {
+  const f = _seedFeatures(b, 'mercury');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#cdb594'); g.addColorStop(0.5, '#9a8870'); g.addColorStop(1, '#5b4d3a');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  for (const c of f.craters) {
+    const cx = b.x + Math.cos(c.ang) * r * c.dist;
+    const cy = b.y + Math.sin(c.ang) * r * c.dist;
+    const cr = r * c.size;
+    ctx.fillStyle = `rgba(40,30,20,${c.darkness})`;
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(220,200,170,0.25)';
+    ctx.beginPath(); ctx.arc(cx - cr * 0.25, cy - cr * 0.3, cr * 0.55, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticVenus(b, r) {
+  const f = _seedFeatures(b, 'venus');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#ffdc8a'); g.addColorStop(0.55, '#e09a48'); g.addColorStop(1, '#7a3a10');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Cloud bands as sinuous horizontal strokes
+  for (const s of f.swirls) {
+    ctx.strokeStyle = `rgba(255, 220, 160, 0.40)`;
+    ctx.lineWidth = r * s.thick;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    const yC = b.y + r * s.yFrac;
+    const xL = b.x - r;
+    const xR = b.x + r;
+    for (let x = xL; x <= xR; x += r * 0.05) {
+      const yy = yC + Math.sin((x - b.x) / r * Math.PI * (s.amp * 14 + 2) + s.phase) * r * s.amp;
+      if (x === xL) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticEarth(b, r) {
+  ctx.save();
+  _clipDisc(b, r);
+  // Ocean
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#5fa8e8'); g.addColorStop(0.55, '#1f4f9a'); g.addColorStop(1, '#0a2454');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Continents — reuse the procedural continents (applyEarthFeatures) if any,
+  // otherwise generate green blobs deterministically.
+  if (!b.continents) {
+    b.continents = [];
+    for (let i = 0; i < 5; i++) {
+      b.continents.push({
+        angle: Math.random() * Math.PI * 2,
+        distFrac: Math.random() * 0.55,
+        sizeFrac: 0.20 + Math.random() * 0.16,
+        shade: Math.random()
+      });
+    }
+  }
+  for (const c of b.continents) {
+    const cx = b.x + Math.cos(c.angle) * c.distFrac * r;
+    const cy = b.y + Math.sin(c.angle) * c.distFrac * r;
+    const cr = c.sizeFrac * r;
+    const gShade = Math.round(120 + c.shade * 80);
+    ctx.fillStyle = `rgb(40, ${gShade}, 50)`;
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
+    // Brown coastline
+    ctx.strokeStyle = 'rgba(120,90,55,0.5)';
+    ctx.lineWidth = r * 0.02;
+    ctx.stroke();
+  }
+  // Cloud wisps
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  for (let i = 0; i < 4; i++) {
+    const cx = b.x + Math.cos(i * 1.7 + 0.4) * r * 0.6;
+    const cy = b.y + Math.sin(i * 1.3 + 0.9) * r * 0.55;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, r * 0.25, r * 0.08, i * 0.7, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticMars(b, r) {
+  const f = _seedFeatures(b, 'mars');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#e08858'); g.addColorStop(0.5, '#b8512a'); g.addColorStop(1, '#5e2010');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Dark surface patches
+  for (const p of f.patches) {
+    const cx = b.x + Math.cos(p.ang) * r * p.dist;
+    const cy = b.y + Math.sin(p.ang) * r * p.dist;
+    const cr = r * p.size;
+    ctx.fillStyle = `rgba(80, 30, 10, ${p.darkness})`;
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
+  }
+  // North polar ice cap
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.ellipse(b.x, b.y - r * 0.75, r * 0.55, r * 0.20, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticJupiter(b, r) {
+  const f = _seedFeatures(b, 'jupiter');
+  ctx.save();
+  _clipDisc(b, r);
+  // Base cream gradient
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#f0d8a8'); g.addColorStop(0.6, '#c89858'); g.addColorStop(1, '#604018');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Horizontal bands
+  for (const band of f.bands) {
+    ctx.fillStyle = band.c;
+    ctx.globalAlpha = 0.75;
+    ctx.fillRect(b.x - r, b.y + r * band.y - r * band.w * 0.5, r * 2, r * band.w);
+  }
+  ctx.globalAlpha = 1;
+  // Great Red Spot
+  ctx.fillStyle = '#b04020';
+  ctx.beginPath();
+  ctx.ellipse(b.x + r * 0.25, b.y + r * 0.25, r * 0.20, r * 0.10, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticSaturn(b, r) {
+  const f = _seedFeatures(b, 'saturn');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#f5dca5'); g.addColorStop(0.6, '#c8a058'); g.addColorStop(1, '#604018');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  for (const band of f.bands) {
+    ctx.fillStyle = band.c;
+    ctx.globalAlpha = 0.6;
+    ctx.fillRect(b.x - r, b.y + r * band.y - r * band.w * 0.5, r * 2, r * band.w);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticUranus(b, r) {
+  const f = _seedFeatures(b, 'uranus');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#cef0ec'); g.addColorStop(0.55, '#7ec7be'); g.addColorStop(1, '#2c5c58');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  for (const band of f.bands) {
+    ctx.fillStyle = band.c;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(b.x - r, b.y + r * band.y - r * band.w * 0.5, r * 2, r * band.w);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticNeptune(b, r) {
+  const f = _seedFeatures(b, 'neptune');
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#5a8bff'); g.addColorStop(0.5, '#1f48d8'); g.addColorStop(1, '#08183c');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Great Dark Spot
+  ctx.fillStyle = 'rgba(10, 20, 60, 0.85)';
+  ctx.beginPath();
+  ctx.ellipse(b.x + r * f.spot.x, b.y + r * f.spot.y, r * f.spot.w, r * f.spot.h, 0, 0, Math.PI*2);
+  ctx.fill();
+  // White wisps
+  for (const w of f.wisps) {
+    const wx = b.x + r * w.xFrac;
+    const wy = b.y + r * w.yFrac;
+    ctx.fillStyle = `rgba(255,255,255,${w.opacity})`;
+    ctx.beginPath();
+    ctx.ellipse(wx, wy, r * w.w, r * w.thick, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+function drawRealisticPluto(b, r) {
+  ctx.save();
+  _clipDisc(b, r);
+  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
+  g.addColorStop(0, '#d8c8b0'); g.addColorStop(0.55, '#8a7a64'); g.addColorStop(1, '#3a2e22');
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  // Tombaugh Regio — light tan heart on the lower-right
+  ctx.fillStyle = 'rgba(245,225,190,0.85)';
+  const hx = b.x + r * 0.15, hy = b.y + r * 0.10, hr = r * 0.45;
+  ctx.beginPath();
+  ctx.arc(hx - hr * 0.3, hy - hr * 0.15, hr * 0.5, 0, Math.PI * 2);
+  ctx.arc(hx + hr * 0.3, hy - hr * 0.15, hr * 0.5, 0, Math.PI * 2);
+  ctx.moveTo(hx - hr * 0.55, hy);
+  ctx.quadraticCurveTo(hx, hy + hr, hx + hr * 0.55, hy);
+  ctx.lineTo(hx - hr * 0.55, hy);
+  ctx.fill();
+  ctx.restore();
+  _limbShade(b, r);
+}
+
+// ---- Procedural Sun surface ----
+// fBm value-noise texture with a 4-stop hot-plasma colour ramp, ported from
+// the user's dad's Three.js SDO-304-Å shader. Generated once and cached so
+// we only pay the per-pixel cost on first use.
+function _makeValueNoise3D(seed) {
+  const hash = (x, y, z) => {
+    let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177 + seed * 2654435761;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177);
+    h ^= h >>> 16;
+    return ((h >>> 0) & 0xFFFFFF) / 0xFFFFFF;
+  };
+  const smooth = (t) => t * t * (3 - 2 * t);
+  return (x, y, z) => {
+    const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+    const u = smooth(x - ix), v = smooth(y - iy), w = smooth(z - iz);
+    const c000 = hash(ix,   iy,   iz);
+    const c100 = hash(ix+1, iy,   iz);
+    const c010 = hash(ix,   iy+1, iz);
+    const c110 = hash(ix+1, iy+1, iz);
+    const c001 = hash(ix,   iy,   iz+1);
+    const c101 = hash(ix+1, iy,   iz+1);
+    const c011 = hash(ix,   iy+1, iz+1);
+    const c111 = hash(ix+1, iy+1, iz+1);
+    const x00 = c000 + (c100 - c000) * u;
+    const x10 = c010 + (c110 - c010) * u;
+    const x01 = c001 + (c101 - c001) * u;
+    const x11 = c011 + (c111 - c011) * u;
+    const y0  = x00  + (x10  - x00)  * v;
+    const y1  = x01  + (x11  - x01)  * v;
+    return y0 + (y1 - y0) * w;
+  };
+}
+
+let _sunTextureCanvas = null;
+function getSunTextureCanvas() {
+  if (_sunTextureCanvas) return _sunTextureCanvas;
+  const S = 512;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const n1 = _makeValueNoise3D(7);
+  const n2 = _makeValueNoise3D(19);
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  // Cylindrical x ↔ angle mapping so the texture wraps seamlessly when applied
+  // to a sphere (and reads correctly even on the flat 2D disc here).
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      // fBm — 6 octaves
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 6; k++) {
+        const f = 2.5 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.5);
+        total += amp;
+        amp  *= 0.55;
+        freq *= 2;
+      }
+      let n = v / total;
+      // Domain warp — second noise stretches & breaks up the features
+      const warp = (n2(cx0 * 4, sx0 * 4, yN * 10) - 0.5) * 0.5;
+      n = Math.max(0, Math.min(1, n + warp));
+      // 4-stop colour ramp: dark filaments → red-orange → orange-yellow → near white
+      let R, G, B;
+      if (n < 0.30) {
+        const t = n / 0.30;
+        R = 150 + t * 105; G = 30  + t * 50;  B = 5;
+      } else if (n < 0.62) {
+        const t = (n - 0.30) / 0.32;
+        R = 255;            G = 80  + t * 80;  B = 5  + t * 25;
+      } else if (n < 0.85) {
+        const t = (n - 0.62) / 0.23;
+        R = 255;            G = 160 + t * 75;  B = 30 + t * 80;
+      } else {
+        const t = (n - 0.85) / 0.15;
+        R = 255;            G = 235 + t * 20;  B = 110 + t * 130;
+      }
+      const i = (y * S + x) * 4;
+      data[i] = R; data[i+1] = G; data[i+2] = B; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _sunTextureCanvas = cnv;
+  return cnv;
+}
+
+function drawRealisticSun(b, t) {
+  // Procedural plasma sun: drawImage the cached fBm texture, clipped to the
+  // disc, then add limb darkening for a sphere read and an outer halo.
+  const r = b.radius;
+  ctx.save();
+  _clipDisc(b, r);
+  const tex = getSunTextureCanvas();
+  ctx.drawImage(tex, b.x - r, b.y - r, r * 2, r * 2);
+  // Limb darkening — soft black gradient at the rim so the disc reads spherical.
+  const dg = ctx.createRadialGradient(b.x, b.y, r * 0.55, b.x, b.y, r);
+  dg.addColorStop(0, 'rgba(0,0,0,0)');
+  dg.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  ctx.restore();
+  // Bright limb glow outside the disc — the hot edge from the reference photo.
+  const lg = ctx.createRadialGradient(b.x, b.y, r * 0.97, b.x, b.y, r * 1.22);
+  lg.addColorStop(0, 'rgba(255, 180, 70, 0.55)');
+  lg.addColorStop(1, 'rgba(255, 100, 20, 0)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = lg;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, r * 1.22, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Old cumulus-blob implementation, replaced by the procedural texture above.
+function drawRealisticSun_OLD(b, t) {
+  // Cumulus-textured Sun matching the reference photo: smooth yellow-orange
+  // base + many overlapping translucent blobs (some shadow, some highlight)
+  // that read as cloud-like granulation. No coronal loops or sunspots —
+  // those broke the soft mottled look.
+  const r = b.radius;
+  const f = _seedFeatures(b, 'sun');
+  ctx.save();
+  _clipDisc(b, r);
+  // Smooth base gradient — bright yellow center, warm orange edge.
+  const g = ctx.createRadialGradient(b.x, b.y, r * 0.05, b.x, b.y, r);
+  g.addColorStop(0,    '#ffe888');   // bright yellow core
+  g.addColorStop(0.45, '#ffb04a');   // orange
+  g.addColorStop(0.85, '#ee7820');   // deep orange
+  g.addColorStop(1,    '#d8550e');   // warm rim
+  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+
+  // Cumulus mottling — each cached cell is a soft radial gradient blob.
+  // Dark cells use normal alpha (deeper orange/red shadows); bright cells
+  // use 'lighter' so the yellow highlights glow rather than wash out.
+  for (const c of f.cells) {
+    const cx = b.x + Math.cos(c.ang) * r * c.dist;
+    const cy = b.y + Math.sin(c.ang) * r * c.dist;
+    const cr = r * c.size;
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    if (c.type === 'dark') {
+      cg.addColorStop(0, `rgba(190, 60, 15, ${c.intensity})`);
+      cg.addColorStop(1, 'rgba(190, 60, 15, 0)');
+      ctx.globalCompositeOperation = 'source-over';
+    } else {
+      cg.addColorStop(0, `rgba(255, 230, 130, ${c.intensity * 0.75})`);
+      cg.addColorStop(1, 'rgba(255, 230, 130, 0)');
+      ctx.globalCompositeOperation = 'lighter';
+    }
+    ctx.fillStyle = cg;
+    ctx.beginPath();
+    ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.restore();
+
+  // Soft outer glow — gentle warm halo just past the disc edge.
+  const lg = ctx.createRadialGradient(b.x, b.y, r * 0.96, b.x, b.y, r * 1.18);
+  lg.addColorStop(0, 'rgba(255, 170, 60, 0.45)');
+  lg.addColorStop(1, 'rgba(255, 100, 20, 0)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = lg;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, r * 1.18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRealisticBody(b, t) {
+  if (!realisticMode) return false;
+  const name = (b.name || '').toLowerCase();
+  if (!REALISTIC_NAMES.has(name)) return false;
+  const r = b.radius;
+  if (name === 'sun') {
+    drawRealisticSun(b, t);
+    return true;
+  }
+  // Saturn back-half rings before the disc
+  if (name === 'saturn') drawSaturnRings(b, true, 1);
+  switch (name) {
+    case 'mercury': drawRealisticMercury(b, r); break;
+    case 'venus':   drawRealisticVenus(b, r);   break;
+    case 'earth':   drawRealisticEarth(b, r);   break;
+    case 'mars':    drawRealisticMars(b, r);    break;
+    case 'jupiter': drawRealisticJupiter(b, r); break;
+    case 'saturn':  drawRealisticSaturn(b, r);  break;
+    case 'uranus':  drawRealisticUranus(b, r);  break;
+    case 'neptune': drawRealisticNeptune(b, r); break;
+    case 'pluto':   drawRealisticPluto(b, r);   break;
+  }
+  if (name === 'saturn') drawSaturnRings(b, false, 1);
+  return true;
+}
+
+function toggleRealisticMode() {
+  realisticMode = !realisticMode;
+  const btn = document.getElementById('btn-realistic');
+  if (btn) btn.classList.toggle('active', realisticMode);
 }
 
 // The Great Red Spot — a fixed-position oval of stormy reds clipped to the
@@ -3414,18 +4025,46 @@ function currentScreenScale() {
 }
 
 function drawBody(b, t) {
-  // Bodies always draw at their real size. At extreme zoom-out the AU-scale
-  // planets become sub-pixel dots (as they would in reality) — zoom in to see
-  // them. The unused _bodyOrigR / try-finally below preserves the swap point
-  // in case a minimum is ever reintroduced.
+  // Apply the size-exaggeration multiplier (user-facing slider, default 1).
+  // Swapping b.radius for the duration of the draw means every gradient,
+  // glow, ring, face, and continent that derives off b.radius scales with
+  // it — without touching physics. We restore in the finally below so
+  // collision detection, mass sliders, and stellar-phase code keep seeing
+  // the real radius. (The same try/finally previously hosted a min-screen-
+  // radius hack; that's gone, but the scaffold is now used for the
+  // exaggeration swap.)
   const _bodyOrigR = b.radius;
+  if (sizeExaggeration !== 1) b.radius = b.radius * sizeExaggeration;
   try {
+
+  // Asteroids and comets are batch-drawn outside drawBody for perf — the
+  // main render loop calls drawAsteroidsBatched2D / drawCometsBatched2D
+  // (or the 3D equivalents). If anyone still routes one through drawBody
+  // we fall back to a cheap flat disc here.
+  if (b.isAsteroid) {
+    ctx.fillStyle = b.color || '#9a8a7a';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  if (b.isComet) {
+    drawCometSingle(b);
+    return;
+  }
 
   if (b.isSun) {
     const evo = getSunEvolutionFactor(b);
     const phase = getSunPhase(b);
     const rgFactor = getRedGiantFactor(b);
     drawSunCorona(b, t);
+    // Realistic mode for a body named "Sun" (must be main-sequence — we don't
+    // try to map evolutionary phases to photographs). Paints over the disc
+    // after the corona; face/glow code is skipped below.
+    if (realisticMode && (b.name || '').toLowerCase() === 'sun' && phase === 'main-sequence') {
+      drawRealisticSun(b, t);
+      return;
+    }
 
     // Determine disc color based on phase
     let hex = b.color || '#ffb347';
@@ -3522,6 +4161,14 @@ function drawBody(b, t) {
     const _displayR = planetDisplayRadius(b);
     if (_displayR !== _origR) b.radius = _displayR;
 
+    // Realistic mode — if the body's name matches a real solar-system
+    // planet, paint the textured version (handles its own rings) and skip
+    // the rest of the cartoon path (no glow, no face, no continents on top).
+    if (drawRealisticBody(b, t)) {
+      if (_displayR !== _origR) b.radius = _origR;
+      return;
+    }
+
     // Planetary rings — back half drawn first
     const _isSaturn  = isSaturnLike(b);
     const _isJ1407b  = isJ1407bLike(b);
@@ -3610,21 +4257,204 @@ function drawBody(b, t) {
   }
 }
 
+// Batched asteroid render — flat shaded discs, grouped by color so we only
+// flip fillStyle once per palette entry instead of once per asteroid. Skips
+// the drawBody save/restore + try/finally + size-exag swap entirely. Called
+// from the main render loop in place of per-asteroid drawBody.
+function drawAsteroidsBatched2D() {
+  // Gather asteroids per color once
+  const byColor = new Map();
+  for (const b of bodies) {
+    if (!b.isAsteroid) continue;
+    const c = b.color || '#9a8a7a';
+    let arr = byColor.get(c);
+    if (!arr) { arr = []; byColor.set(c, arr); }
+    arr.push(b);
+  }
+  for (const [color, group] of byColor) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (const b of group) {
+      const r = b.radius * sizeExaggeration;
+      ctx.moveTo(b.x + r, b.y);
+      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+}
+
+function drawAsteroidsBatched3D() {
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  const byColor = new Map();
+  for (const b of bodies) {
+    if (!b.isAsteroid) continue;
+    const proj = project3DScreen(b.x, b.y, b.z || 0);
+    if (proj.scale <= 0) continue;
+    const sr = Math.max(0.5, b.radius * sizeExaggeration * proj.scale);
+    const c = b.color || '#9a8a7a';
+    let arr = byColor.get(c);
+    if (!arr) { arr = []; byColor.set(c, arr); }
+    arr.push({ sx: proj.sx, sy: proj.sy, sr });
+  }
+  for (const [color, group] of byColor) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (const p of group) {
+      ctx.moveTo(p.sx + p.sr, p.sy);
+      ctx.arc(p.sx, p.sy, p.sr, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+}
+
+// Single-comet render — nucleus + tapered tail pointing away from the
+// nearest sun. The tail extends ~1 AU and fades to transparent. In
+// realisticMode the tail is layered (5 stacked tapered strokes from a
+// wide pale-blue haze down to a bright white spine) and the nucleus
+// gets a wider blue-white halo to match the reference photo.
+function drawCometSingle(b) {
+  let nearest = null, bestDistSq = Infinity;
+  for (const s of bodies) {
+    if (!s.isSun) continue;
+    const dx = b.x - s.x, dy = b.y - s.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < bestDistSq) { bestDistSq = d2; nearest = s; }
+  }
+  if (nearest) {
+    const dx = b.x - nearest.x, dy = b.y - nearest.y;
+    const dist = Math.sqrt(bestDistSq);
+    if (dist > 0.0001) {
+      const ux = dx / dist, uy = dy / dist;
+      const px = -uy, py = ux;
+      const tailLen = _AU_SIM_UNITS;
+      const tipX = b.x + ux * tailLen;
+      const tipY = b.y + uy * tailLen;
+
+      if (realisticMode) {
+        // Five-layer tail: from the widest outer haze to the brightest
+        // inner spine. Widths are fractions of an AU, alphas decay to 0
+        // 70% of the way along so the tip fades smoothly.
+        const layers = [
+          { wFrac: 0.026, r: 130, g: 165, bC: 220, a: 0.40 },
+          { wFrac: 0.018, r: 165, g: 200, bC: 240, a: 0.55 },
+          { wFrac: 0.011, r: 205, g: 225, bC: 250, a: 0.70 },
+          { wFrac: 0.006, r: 235, g: 245, bC: 255, a: 0.85 },
+          { wFrac: 0.0025, r: 255, g: 255, bC: 255, a: 0.95 }
+        ];
+        for (const ly of layers) {
+          const baseW = _AU_SIM_UNITS * ly.wFrac;
+          const c = (a) => `rgba(${ly.r},${ly.g},${ly.bC},${a})`;
+          const grad = ctx.createLinearGradient(b.x, b.y, tipX, tipY);
+          grad.addColorStop(0,    c(ly.a));
+          grad.addColorStop(0.55, c(ly.a * 0.45));
+          grad.addColorStop(1,    c(0));
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.moveTo(b.x + px * baseW, b.y + py * baseW);
+          ctx.lineTo(b.x - px * baseW, b.y - py * baseW);
+          ctx.lineTo(tipX, tipY);
+          ctx.closePath();
+          ctx.fill();
+        }
+        // Coma — bluish glow around the nucleus.
+        const haloR = Math.max(b.radius * 8, _AU_SIM_UNITS * 0.003);
+        const halo = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, haloR);
+        halo.addColorStop(0,    'rgba(255, 255, 255, 0.95)');
+        halo.addColorStop(0.30, 'rgba(200, 225, 255, 0.55)');
+        halo.addColorStop(0.70, 'rgba(140, 175, 230, 0.20)');
+        halo.addColorStop(1,    'rgba(80, 110, 180, 0)');
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, haloR, 0, Math.PI * 2);
+        ctx.fill();
+        // Nucleus core
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, Math.max(b.radius, 0.6), 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+
+      // Non-realistic: simpler two-gradient tail.
+      const baseW = Math.max(b.radius * 8, _AU_SIM_UNITS * 0.005);
+      const grad = ctx.createLinearGradient(b.x, b.y, tipX, tipY);
+      grad.addColorStop(0,   'rgba(190, 215, 255, 0.85)');
+      grad.addColorStop(0.3, 'rgba(190, 215, 255, 0.45)');
+      grad.addColorStop(1,   'rgba(190, 215, 255, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(b.x + px * baseW, b.y + py * baseW);
+      ctx.lineTo(b.x - px * baseW, b.y - py * baseW);
+      ctx.lineTo(tipX, tipY);
+      ctx.closePath();
+      ctx.fill();
+      const innerW = baseW * 0.45;
+      const grad2 = ctx.createLinearGradient(b.x, b.y, tipX, tipY);
+      grad2.addColorStop(0, 'rgba(255, 255, 255, 0.55)');
+      grad2.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = grad2;
+      ctx.beginPath();
+      ctx.moveTo(b.x + px * innerW, b.y + py * innerW);
+      ctx.lineTo(b.x - px * innerW, b.y - py * innerW);
+      ctx.lineTo(tipX, tipY);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  // Non-realistic nucleus
+  ctx.save();
+  ctx.shadowColor = '#aaccff';
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = b.color || '#eaf2ff';
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, Math.max(b.radius, 0.5), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawTrails() {
   if (!showTrails) return;
   // Keep the trail stroke at a constant screen-space width regardless of zoom,
   // so AU-scale orbits stay visible even when the camera is zoomed far out.
   const screenLineWidth = 1.2 / viewZoom;
+  // Rounded joins/caps soften the visible angle between sparse samples so the
+  // orbit reads as a curve instead of a sequence of line segments.
+  ctx.lineJoin = 'round';
+  ctx.lineCap  = 'round';
   for (const b of bodies) {
     if (b.trail.length < 2) continue;
+    // The trail array can grow up to ~2× TRAIL_LEN between trims (see step()),
+    // so start from the most recent TRAIL_LEN samples and stride to keep the
+    // line count manageable at high time-warp.
+    const start = Math.max(0, b.trail.length - TRAIL_LEN);
+    const step = TRAIL_RENDER_STRIDE;
+    const last = b.trail.length - 1;
     ctx.beginPath();
-    ctx.moveTo(b.trail[0].x, b.trail[0].y);
-    for (let i = 1; i < b.trail.length; i++) {
-      ctx.lineTo(b.trail[i].x, b.trail[i].y);
+    // Quadratic-curve smoothing through the captured points: each pair of
+    // consecutive samples (i, i+1) becomes a quadratic Bezier where the
+    // control point is sample i and the endpoint is the midpoint of i and i+1.
+    // This rounds off the discrete physics-step corners visually without
+    // adding extra samples.
+    ctx.moveTo(b.trail[start].x, b.trail[start].y);
+    for (let i = start + step; i + step <= last; i += step) {
+      const x0 = b.trail[i].x, y0 = b.trail[i].y;
+      const xn = b.trail[i + step].x, yn = b.trail[i + step].y;
+      ctx.quadraticCurveTo(x0, y0, (x0 + xn) * 0.5, (y0 + yn) * 0.5);
     }
-    ctx.strokeStyle = b.color;
-    ctx.lineWidth = b.isSun ? 0 : screenLineWidth;
-    ctx.globalAlpha = 0.3;
+    // Always close the line at the most recent sample so the head reads as
+    // attached to the body, regardless of stride.
+    ctx.lineTo(b.trail[last].x, b.trail[last].y);
+    // Comet trails are deliberately brighter + thicker + more opaque than
+    // normal orbit lines so the elliptical path reads at AU zoom.
+    if (b.isComet) {
+      ctx.strokeStyle = '#b8d8ff';
+      ctx.lineWidth = screenLineWidth * 1.8;
+      ctx.globalAlpha = 0.55;
+    } else {
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = b.isSun ? 0 : screenLineWidth;
+      ctx.globalAlpha = 0.3;
+    }
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
@@ -3789,8 +4619,8 @@ function loop(t) {
     };
   }
 
-  // Pure-black canvas first — this is what shows when you're outside the
-  // universe. Then the bluish backdrop + stars get clipped to the disc.
+  // Pure-black canvas. Background is uniformly black now (was bluish-tinted
+  // inside Universe discs); stars are drawn on top inside the clip block.
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, w, h);
 
@@ -3805,8 +4635,8 @@ function loop(t) {
     ctx.arc(universeDisc.sx, universeDisc.sy, universeDisc.sr, 0, Math.PI * 2);
     ctx.clip();
   }
-  ctx.fillStyle = '#0a0a1a';
-  ctx.fillRect(0, 0, w, h);
+  // Pure-black space + stars on top. (The earlier bluish #0a0a1a nebula tint
+  // was removed at the user's request.)
   drawStars(animTime);
   ctx.restore();
 
@@ -3869,34 +4699,79 @@ function loop(t) {
       ctx.restore();
     }
 
-    // Trails: project each point and stroke in screen space.
-    if (showTrails) {
-      ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
-      for (const b of bodies) {
-        if (b.trail.length < 2) continue;
-        ctx.beginPath();
-        let started = false;
-        for (const pt of b.trail) {
-          const proj = project3DScreen(pt.x, pt.y, pt.z || 0);
-          if (!started) { ctx.moveTo(proj.sx, proj.sy); started = true; }
-          else ctx.lineTo(proj.sx, proj.sy);
+    // Depth-aware trail rendering. Each sun gets a projected depth value;
+    // any trail point further from the camera than the FURTHEST sun is "in
+    // back" (drawn before suns, so the sun disc occludes it). Everything
+    // else is "in front" (drawn after suns and most planets).
+    const projected = bodies.map(b => ({ body: b, depth: project3D(b.x, b.y, b.z || 0).z }));
+    const sunsSorted    = projected.filter(p => p.body.isSun ).sort((a, b) => b.depth - a.depth);
+    const planetsSorted = projected.filter(p => !p.body.isSun).sort((a, b) => b.depth - a.depth);
+    // Cache the deepest sun's z so back-trail classification is one number.
+    const maxSunDepth = sunsSorted.length ? Math.max(...sunsSorted.map(p => p.depth)) : -Infinity;
+
+    // Walks a single body's trail and strokes only the segments whose
+    // projected depth falls in the requested half-space ('back' or 'front').
+    // Consecutive same-layer points share a sub-path; crossing the boundary
+    // closes the current stroke and starts a fresh one on the other side.
+    const drawBodyTrailLayer3D = (b, layer) => {
+      if (b.trail.length < 2) return;
+      const start = Math.max(0, b.trail.length - TRAIL_LEN);
+      const step = TRAIL_RENDER_STRIDE;
+      const last = b.trail.length - 1;
+      let inPath = false;
+      const strokeIfOpen = () => {
+        if (!inPath) return;
+        if (b.isComet) {
+          ctx.strokeStyle = '#b8d8ff';
+          ctx.lineWidth = 2.0;
+          ctx.globalAlpha = 0.55;
+        } else {
+          ctx.strokeStyle = b.color;
+          ctx.lineWidth = b.isSun ? 0 : 1.2;
+          ctx.globalAlpha = 0.3;
         }
-        ctx.strokeStyle = b.color;
-        ctx.lineWidth = b.isSun ? 0 : 1.2;
-        ctx.globalAlpha = 0.3;
         ctx.stroke();
         ctx.globalAlpha = 1;
-      }
-    }
+        inPath = false;
+      };
+      const visit = (idx) => {
+        const pt = b.trail[idx];
+        const proj = project3DScreen(pt.x, pt.y, pt.z || 0);
+        const isBack = proj.depth > maxSunDepth;
+        const want = (layer === 'back') === isBack;
+        if (want) {
+          if (!inPath) { ctx.beginPath(); ctx.moveTo(proj.sx, proj.sy); inPath = true; }
+          else         { ctx.lineTo(proj.sx, proj.sy); }
+        } else {
+          strokeIfOpen();
+        }
+      };
+      for (let i = start; i + step <= last; i += step) visit(i);
+      visit(last);
+      strokeIfOpen();
+    };
 
-    // Depth-sort bodies back to front (suns first within equal depth).
-    const sorted = bodies.map(b => ({ body: b, depth: project3D(b.x, b.y, b.z || 0).z }));
-    sorted.sort((a, b) => {
-      if (b.depth !== a.depth) return b.depth - a.depth;
-      // For equal depth (or near-equal), draw suns first so planets layer on top
-      return (a.body.isSun ? 0 : 1) - (b.body.isSun ? 0 : 1);
-    });
-    for (const { body } of sorted) {
+    const drawTrailLayer3D = (layer) => {
+      if (!showTrails) return;
+      ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+      ctx.lineJoin = 'round';
+      ctx.lineCap  = 'round';
+      for (const b of bodies) drawBodyTrailLayer3D(b, layer);
+    };
+
+    // Order: back-of-sun trails → suns → front-of-sun trails → asteroids
+    // (batched) → planets / comets / moons (each with its own 3D transform).
+    drawTrailLayer3D('back');
+    for (const { body } of sunsSorted) {
+      ctx.save();
+      applyEntity3DTransform(body.x, body.y, body.z || 0);
+      drawBody(body, animTime);
+      ctx.restore();
+    }
+    drawTrailLayer3D('front');
+    drawAsteroidsBatched3D();
+    for (const { body } of planetsSorted) {
+      if (body.isAsteroid) continue;  // already batched above
       ctx.save();
       applyEntity3DTransform(body.x, body.y, body.z || 0);
       drawBody(body, animTime);
@@ -3983,11 +4858,19 @@ function loop(t) {
     ctx.translate(-viewX, -viewY);
 
     drawGalaxies();
-    drawTrails();
 
-    // Draw bodies (suns first, then planets on top)
+    // Suns first — drawn UNDER the trails so the sun doesn't paint over
+    // the orbit lines passing through its disc.
     for (const b of bodies) { if (b.isSun) drawBody(b, animTime); }
-    for (const b of bodies) { if (!b.isSun) drawBody(b, animTime); }
+    drawTrails();
+    // Asteroids batched separately — flat discs grouped by color, no per-body
+    // drawBody overhead. This is the big asteroid-belt perf path.
+    drawAsteroidsBatched2D();
+    // Planets / moons / comets / anything else on top of trails + asteroids.
+    for (const b of bodies) {
+      if (b.isSun || b.isAsteroid) continue;
+      drawBody(b, animTime);
+    }
 
     drawRockets(animTime);
     drawMergeEffects();
@@ -4118,7 +5001,9 @@ function buildControls() {
 
   // Planets
   const pc = document.getElementById('planet-controls');
-  const planets = bodies.filter(b => !b.isSun);
+  // Asteroids are excluded from the body card list — a belt of hundreds
+  // would overwhelm the panel and they have no per-instance settings to tweak.
+  const planets = bodies.filter(b => !b.isSun && !b.isAsteroid);
   if (planets.length === 0) {
     pc.innerHTML = '<p style="color:#555;font-size:0.8em;padding:8px">No planets. Click "Add Planet" to create one.</p>';
     populateBodySelect();
@@ -4129,7 +5014,11 @@ function buildControls() {
     const vmul = p.velMul !== undefined ? p.velMul : 1;
     const isMoon = p.isMoon === true;
     const isDwarfStar   = !isMoon && p.mass > 50;
-    const isDwarfPlanet = !isMoon && p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
+    const nameLow = (p.name || '').toLowerCase();
+    const isDwarfPlanet = !isMoon && (
+      (p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS) ||
+      NAMED_DWARF_PLANETS.has(nameLow)
+    );
     const isPlanet      = !isMoon && !isDwarfStar && !isDwarfPlanet;
     const planetLockCls = p.locked ? 'lock-btn locked' : 'lock-btn';
     const planetLockIcon = p.locked ? '🔒' : '🔓';
@@ -4245,19 +5134,27 @@ const PLANET_MAX_MASS = 8 * JUPITER_MASS_SIM;
 // Dwarf-planet (brown-dwarf-ish) band: 13–80 × Jupiter mass.
 const DWARF_PLANET_MIN_MASS = 13 * JUPITER_MASS_SIM;
 const DWARF_PLANET_MAX_MASS = 80 * JUPITER_MASS_SIM;
+// Real solar-system dwarf planets. Names matched case-insensitively in the
+// body-card classifier so a body called "Pluto" / "Ceres" / etc. always
+// reads as ◌ Dwarf Planet, regardless of how the mass-band knobs are set.
+const NAMED_DWARF_PLANETS = new Set([
+  'pluto', 'ceres', 'eris', 'haumea', 'makemake', 'sedna', 'gonggong', 'quaoar', 'orcus'
+]);
 
 function updatePlanetMass(id, v) {
   const p = bodies.find(b => b.id === id);
   if (p) {
+    const nameLow = (p.name || '').toLowerCase();
+    const nameDwarf = NAMED_DWARF_PLANETS.has(nameLow);
     const wasDwarfStar = p.mass > 50;
-    const wasDwarfPlanet = p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
+    const wasDwarfPlanet = (p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS) || nameDwarf;
     p.mass = Math.max(1e-8, parseFloat(v));
     p.radius = 3 + Math.cbrt(p.mass) * 2.2;
     const el = document.getElementById('mass-val-' + id);
     if (el) el.textContent = fmtPlanetMass(p.mass);
     // Re-render controls when crossing the dwarf-star or dwarf-planet threshold
     const isDwarfStar = p.mass > 50;
-    const isDwarfPlanet = p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS;
+    const isDwarfPlanet = (p.mass >= DWARF_PLANET_MIN_MASS && p.mass <= DWARF_PLANET_MAX_MASS) || nameDwarf;
     if (wasDwarfStar !== isDwarfStar || wasDwarfPlanet !== isDwarfPlanet) buildControls();
   }
 }
@@ -4416,6 +5313,11 @@ function showAddPlanetModal() {
         <input id="new-planet-mass" type="range" min="${logMin}" max="${logMax}" step="0.01" value="${defaultLog}" style="width:100%;cursor:pointer" />
         <div style="font-size:0.65em;color:#666;margin-top:3px">${fmtPlanetMass(PLANET_MIN_MASS)} → ${fmtPlanetMass(PLANET_MAX_MASS)} (2.514×10⁻⁷ M☉ → 8 M♃)</div>
       </div>
+      <div style="margin-bottom:14px">
+        <label style="display:flex;justify-content:space-between;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px"><span>Distance</span><span id="new-planet-dist-val" style="color:#bbb;font-variant-numeric:tabular-nums"></span></label>
+        <input id="new-planet-dist" type="range" min="-1.3" max="2.5" step="0.01" value="0" style="width:100%;cursor:pointer" />
+        <div style="font-size:0.65em;color:#666;margin-top:3px">0.05 AU → ~316 AU (log scale; 1.0 = Earth distance)</div>
+      </div>
       <div style="margin-bottom:20px">
         <label style="display:block;font-size:0.75em;color:#888;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Color</label>
         <div style="display:flex;align-items:center;gap:10px">
@@ -4450,6 +5352,16 @@ function showAddPlanetModal() {
   massInput.addEventListener('input', refreshMassLabel);
   refreshMassLabel();
 
+  // Distance slider: log-scale value is in AU, -1.3 → 2.5 (≈ 0.05 → 316 AU).
+  const distInput = document.getElementById('new-planet-dist');
+  const distVal   = document.getElementById('new-planet-dist-val');
+  function refreshDistLabel() {
+    const au = Math.pow(10, parseFloat(distInput.value));
+    distVal.textContent = (au >= 10 ? au.toFixed(1) : au.toFixed(2)) + ' AU';
+  }
+  distInput.addEventListener('input', refreshDistLabel);
+  refreshDistLabel();
+
   // Cancel
   document.getElementById('modal-cancel').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
@@ -4458,8 +5370,9 @@ function showAddPlanetModal() {
   document.getElementById('modal-create').addEventListener('click', () => {
     const name = nameInput.value.trim() || defaultName;
     const color = document.getElementById('new-planet-color').value;
-    const mass = Math.pow(10, parseFloat(massInput.value));
-    spawnPlanet(name, color, mass);
+    const mass  = Math.pow(10, parseFloat(massInput.value));
+    const distAU = Math.pow(10, parseFloat(distInput.value));
+    spawnPlanet(name, color, mass, distAU);
     overlay.remove();
   });
 
@@ -4470,13 +5383,250 @@ function showAddPlanetModal() {
   });
 }
 
-function spawnPlanet(name, color, massOverride) {
+// Asteroid mass + size bands, in sim units.
+//
+// Mass range (per user spec): 1.57×10¹² tons → 1.57×10¹⁵ tons.
+//   1 sim mass unit = Sun mass / 1000 = 1.989×10²⁷ kg = 1.989×10²⁴ tons,
+//   so the band in sim units is 7.89×10⁻¹³ → 7.89×10⁻¹⁰.
+//
+// Size range (per user spec): 1 m → 1000 km.
+//   1 sim length unit = Sun radius / 28 = 695,700 km / 28 ≈ 24,846 km,
+//   so the band is 4.02×10⁻⁸ → 4.02×10⁻².
+//
+// Each asteroid picks a single log-uniform "size factor" in [0, 1] and uses
+// it for BOTH mass and radius — bigger rocks are heavier, smaller ones are
+// lighter, matching the way the user paired the bounds.
+const ASTEROID_MASS_MIN_SIM   = 1.57e12 * 1000 / 1.989e27;  // ≈ 7.89e-13
+const ASTEROID_MASS_MAX_SIM   = 1.57e15 * 1000 / 1.989e27;  // ≈ 7.89e-10
+const ASTEROID_RADIUS_MIN_SIM = 0.001 / 24846;              // 1 m,    ≈ 4.02e-8
+const ASTEROID_RADIUS_MAX_SIM = 1000  / 24846;              // 1000 km,≈ 4.02e-2
+
+// Asteroid belt spawn. Picks K "clump anchors" around the ring and spawns
+// asteroids tightly around each one (Box–Muller Gaussians on both angle and
+// radius) so the belt reads as a handful of dense knots instead of a uniform
+// thin ring. Each asteroid gets the circular orbital velocity for its actual
+// distance plus a small randomization for natural eccentricity.
+// Asteroids are flagged `isAsteroid` so they skip trails, body cards, and
+// the equation-bar dropdown.
+function spawnAsteroidBelt(count = 500, centerAU = 2.7, radialSigmaAU = 0.08) {
+  const sun = bodies.find(b => b.isSun);
+  if (!sun) return;
+  const cx = sun.x, cy = sun.y;
+  const sunMass = sun.mass;
+  const greys = ['#7d7060', '#8b7e6c', '#9a8a7a', '#a89080', '#aaa', '#857668', '#736655', '#a09080'];
+  const logRMin = Math.log10(ASTEROID_RADIUS_MIN_SIM);
+  const logRMax = Math.log10(ASTEROID_RADIUS_MAX_SIM);
+  const logMMin = Math.log10(ASTEROID_MASS_MIN_SIM);
+  const logMMax = Math.log10(ASTEROID_MASS_MAX_SIM);
+
+  // Standard-normal sample via Box–Muller. Used to give each clump a fuzzy
+  // Gaussian halo in both radius and angle.
+  const gauss = () => {
+    const u1 = Math.random() || 1e-9;
+    const u2 = Math.random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  // Pick a handful of clump centers around the ring.
+  const NUM_CLUMPS = 8;
+  const ANGULAR_SIGMA = 0.04;  // ≈ 2.3°  → tight angular cluster
+  const clumpAngles = [];
+  for (let i = 0; i < NUM_CLUMPS; i++) {
+    clumpAngles.push(Math.random() * Math.PI * 2);
+  }
+
+  for (let i = 0; i < count; i++) {
+    const clumpAngle = clumpAngles[i % NUM_CLUMPS];
+    const angle  = clumpAngle + gauss() * ANGULAR_SIGMA;
+    const auDist = centerAU   + gauss() * radialSigmaAU;
+    if (auDist <= 0) continue;
+    const dist   = _AU_SIM_UNITS * auDist;
+    const orbV   = Math.sqrt(G_BASE * sunMass / dist);
+    const speedJitter = 0.96 + Math.random() * 0.08;   // tighter velocity spread = clumps drift less
+    const color  = greys[Math.floor(Math.random() * greys.length)];
+    // Shared size factor so radius and mass correlate (bigger = heavier).
+    const sizeFactor = Math.random();
+    const radius = Math.pow(10, logRMin + sizeFactor * (logRMax - logRMin));
+    const mass   = Math.pow(10, logMMin + sizeFactor * (logMMax - logMMin));
+    bodies.push({
+      id: 'asteroid-' + (nextAsteroidId++),
+      name: 'Asteroid ' + nextAsteroidId,
+      isSun: false,
+      isAsteroid: true,
+      x: cx + Math.cos(angle) * dist,
+      y: cy + Math.sin(angle) * dist,
+      vx: -Math.sin(angle) * orbV * speedJitter,
+      vy:  Math.cos(angle) * orbV * speedJitter,
+      mass,
+      radius,
+      color,
+      trail: [],
+      velMul: 1
+    });
+  }
+  buildControls();
+}
+
+function addAsteroidBelt() {
+  spawnAsteroidBelt();
+}
+
+// Wipe every asteroid currently in the scene (leaves suns, planets, moons
+// untouched). Useful when a belt has filled up and you want a clean view.
+function removeAsteroidBelt() {
+  const before = bodies.length;
+  bodies = bodies.filter(b => !b.isAsteroid);
+  if (bodies.length !== before) buildControls();
+}
+
+// Comet mass + size bands, in sim units.
+//   Mass: 5×10⁹ kg → 5×10¹² kg = 2.51×10⁻¹⁸ → 2.51×10⁻¹⁵ sim units.
+//   Radius: 0.5 km → 10 km        = 2.01×10⁻⁵ → 4.02×10⁻⁴ sim units.
+const COMET_MASS_MIN_SIM   = 5e9  / 1.989e27;
+const COMET_MASS_MAX_SIM   = 5e12 / 1.989e27;
+const COMET_RADIUS_MIN_SIM = 0.5  / 24846;
+const COMET_RADIUS_MAX_SIM = 10   / 24846;
+
+// Real-world named comets. periodYears must be ≥ 0; orbit shape is recovered
+// from period + eccentricity via Kepler's third law in spawnComet().
+const NAMED_COMETS = {
+  'halley':         { periodYears: 76,    eccentricity: 0.967 },
+  // Easy to extend (e.g. 'hale-bopp': { periodYears: 2533, eccentricity: 0.995 }).
+};
+
+// Names that resolve to Shoemaker–Levy 9 (collision-course comet → Jupiter).
+// Normalized by lower-casing and stripping whitespace / dashes / underscores.
+const SL9_NAME_KEYS = new Set([
+  'shoemakerlevy9', 'shoemakerlevy', 'sl9', 'shoemakerlevynine'
+]);
+function _normCometName(s) {
+  return (s || '').toLowerCase().replace(/[\s\-_]/g, '');
+}
+
+// Spawn a Shoemaker–Levy 9-style comet inbound to Jupiter. The real S-L 9
+// impacted Jupiter in 1994 after being shredded by tidal forces on a prior
+// pass; we model the post-shred bare nucleus and just hurl it in.
+function spawnShoemakerLevy9() {
+  const jupiter = bodies.find(b => (b.name || '').toLowerCase() === 'jupiter');
+  if (!jupiter) { alert('No body named "Jupiter" — name a planet Jupiter first.'); return; }
+  // Start ~80 Jupiter-radii away, with velocity pointing roughly at Jupiter
+  // (inheriting Jupiter's orbital velocity so the collision happens in
+  // Jupiter's frame, not the Sun's).
+  const startDist = Math.max(jupiter.radius * 80, _AU_SIM_UNITS * 0.05);
+  const angle = Math.random() * Math.PI * 2;
+  const sx = jupiter.x + Math.cos(angle) * startDist;
+  const sy = jupiter.y + Math.sin(angle) * startDist;
+  const dx = jupiter.x - sx, dy = jupiter.y - sy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const ux = dx / dist, uy = dy / dist;
+  // Inward speed: half escape velocity at start distance — guarantees impact
+  // once gravity gets involved, and gives a dramatic approach.
+  const vEsc  = Math.sqrt(2 * G_BASE * jupiter.mass / startDist);
+  const vIn   = vEsc * 0.5;
+  const sun = bodies.find(b => b.isSun);
+  const sunMass = sun ? sun.mass : 1000;
+  // Mass + radius — pick a mid-size comet (around the average of the band).
+  const lerpLog = (a0, a1, sf) => Math.pow(10, Math.log10(a0) + sf * (Math.log10(a1) - Math.log10(a0)));
+  const mass   = lerpLog(COMET_MASS_MIN_SIM,   COMET_MASS_MAX_SIM,   0.6);
+  const radius = lerpLog(COMET_RADIUS_MIN_SIM, COMET_RADIUS_MAX_SIM, 0.6);
+  const id = nextCometId++;
+  bodies.push({
+    id: 'comet-' + id,
+    name: 'Shoemaker-Levy 9',
+    isSun: false,
+    isComet: true,
+    x: sx, y: sy,
+    vx: jupiter.vx + ux * vIn,
+    vy: jupiter.vy + uy * vIn,
+    mass, radius,
+    color: '#eaf2ff',
+    trail: [], velMul: 1
+  });
+  buildControls();
+}
+
+// Spawn a single comet on an eccentric oval orbit around the primary sun.
+// We place it at aphelion and give it the vis-viva velocity for that point
+// (perpendicular to the sun-comet vector), which produces a clean ellipse
+// with the chosen semi-major axis and eccentricity — exactly the shape in
+// the user's reference picture. Pass a name string ("halley", etc.) to
+// reproduce a real comet's orbital period.
+function spawnComet(nameOverride) {
+  // Special-case: Shoemaker–Levy 9 short-circuits to a Jupiter-impactor.
+  if (nameOverride && SL9_NAME_KEYS.has(_normCometName(nameOverride))) {
+    spawnShoemakerLevy9();
+    return;
+  }
+  const sun = bodies.find(b => b.isSun);
+  if (!sun) return;
+  const sunMass = sun.mass;
+  let a_AU, e;
+  const named = nameOverride && NAMED_COMETS[nameOverride.toLowerCase()];
+  if (named) {
+    // Solve a from period via Kepler: T² = 4π² · a³ / (G · M).
+    // 1 sim year = _EARTH_ORBIT_PERIOD_DT physics-dt at 1× speed.
+    const T = named.periodYears * _EARTH_ORBIT_PERIOD_DT;
+    const a3 = (T * T) * G_BASE * sunMass / (4 * Math.PI * Math.PI);
+    const aSim = Math.cbrt(a3);
+    a_AU = aSim / _AU_SIM_UNITS;
+    e = named.eccentricity;
+  } else {
+    // Highly elliptical orbit, semi-major axis 8–38 AU, e in [0.65, 0.95].
+    a_AU = 8 + Math.random() * 30;
+    e    = 0.65 + Math.random() * 0.30;
+  }
+  const a = _AU_SIM_UNITS * a_AU;
+  const r_apo = a * (1 + e);
+  const v_apo = Math.sqrt(G_BASE * sunMass * (1 - e) / (a * (1 + e)));
+  const angle = Math.random() * Math.PI * 2;
+
+  // Mass + radius correlated via a single log-uniform size factor.
+  const sf = Math.random();
+  const lerpLog = (a0, a1) => Math.pow(10, Math.log10(a0) + sf * (Math.log10(a1) - Math.log10(a0)));
+  const mass   = lerpLog(COMET_MASS_MIN_SIM,   COMET_MASS_MAX_SIM);
+  const radius = lerpLog(COMET_RADIUS_MIN_SIM, COMET_RADIUS_MAX_SIM);
+
+  const id = nextCometId++;
+  // Preserve the user-provided casing for named comets ("Halley", not "halley").
+  const finalName = nameOverride ? nameOverride : 'Comet ' + id;
+  bodies.push({
+    id: 'comet-' + id,
+    name: finalName,
+    isSun: false,
+    isComet: true,
+    x: sun.x + Math.cos(angle) * r_apo,
+    y: sun.y + Math.sin(angle) * r_apo,
+    vx: -Math.sin(angle) * v_apo,
+    vy:  Math.cos(angle) * v_apo,
+    mass,
+    radius,
+    color: '#eaf2ff',
+    trail: [],
+    velMul: 1
+  });
+  buildControls();
+}
+
+function addComet() { spawnComet(); }
+
+function removeComets() {
+  const before = bodies.length;
+  bodies = bodies.filter(b => !b.isComet);
+  if (bodies.length !== before) buildControls();
+}
+
+function spawnPlanet(name, color, massOverride, distAU) {
   const sun = bodies.find(b => b.isSun);
   const cx = sun ? sun.x : canvas.clientWidth / 2;
   const cy = sun ? sun.y : canvas.clientHeight / 2;
   const sunMass = sun ? sun.mass : 1000;
 
-  const dist = 100 + Math.random() * 260;
+  // Distance: if the caller specified an AU value (Add Planet modal), use it
+  // exactly; otherwise roll a random distance in the inner-system range.
+  const distAUFinal = (isFinite(distAU) && distAU > 0)
+    ? distAU
+    : (0.3 + Math.random() * 4.7);
+  const dist = _AU_SIM_UNITS * distAUFinal;
   const angle = Math.random() * Math.PI * 2;
   // Mass clamped to the planet spawner's allowed range
   // [2.514e-7 × Sun, 8 × Jupiter]. If no explicit mass was passed, roll one
@@ -4898,7 +6048,46 @@ function toggleThreeD() {
     // Reset camera angles so 2D doesn't carry over a rotated view.
     cameraYaw = 0;
     cameraPitch = 0;
+    syncCameraSliders();
   }
+}
+
+// Push current camera angles into the sliders (after a mouse-drag rotation
+// or a toggle-off) so the UI stays in sync.
+function syncCameraSliders() {
+  const t = document.getElementById('tilt-slider');
+  const tv = document.getElementById('tilt-val');
+  const y = document.getElementById('yaw-slider');
+  const yv = document.getElementById('yaw-val');
+  if (t && tv) {
+    const deg = Math.round(-cameraPitch * 180 / Math.PI);
+    t.value = String(deg);
+    tv.textContent = deg + '°';
+  }
+  if (y && yv) {
+    const deg = Math.round(cameraYaw * 180 / Math.PI);
+    y.value = String(deg);
+    yv.textContent = deg + '°';
+  }
+}
+
+// Tilt slider — degrees of pitch (negative cameraPitch = looking down, which
+// is the natural "tilt forward" feel). Auto-enables 3D when nonzero.
+function setCameraTiltDeg(v) {
+  const deg = parseFloat(v);
+  cameraPitch = -(deg * Math.PI / 180);
+  const tv = document.getElementById('tilt-val');
+  if (tv) tv.textContent = Math.round(deg) + '°';
+  if (deg !== 0 && !is3D) toggleThreeD();
+}
+
+// Rotate slider — degrees of yaw. Auto-enables 3D when nonzero.
+function setCameraYawDeg(v) {
+  const deg = parseFloat(v);
+  cameraYaw = deg * Math.PI / 180;
+  const yv = document.getElementById('yaw-val');
+  if (yv) yv.textContent = Math.round(deg) + '°';
+  if (deg !== 0 && !is3D) toggleThreeD();
 }
 
 function resetSim() {
@@ -4922,16 +6111,35 @@ function toggleTrails() {
   }
 }
 
+// Opt-in toggle: records and renders trails for asteroids too. Off by
+// default because 200+ trails are expensive. When turned off, existing
+// asteroid trails are cleared.
+function toggleAsteroidTrails() {
+  asteroidTrailsEnabled = !asteroidTrailsEnabled;
+  const btn = document.getElementById('btn-asteroid-trails');
+  if (btn) btn.classList.toggle('active', asteroidTrailsEnabled);
+  if (!asteroidTrailsEnabled) {
+    for (const b of bodies) if (b.isAsteroid) b.trail = [];
+  }
+}
+
 function fmtSpeedMul(x) {
-  if (x >= 1e6) return (x / 1e6).toFixed(2) + 'M×';
-  if (x >= 1e3) return (x / 1e3).toFixed(2) + 'k×';
-  if (x >= 100) return x.toFixed(0) + '×';
-  if (x >= 10)  return x.toFixed(1) + '×';
+  if (x >= 1e15) return (x / 1e15).toFixed(2) + 'Q×';   // quadrillion
+  if (x >= 1e12) return (x / 1e12).toFixed(2) + 'T×';   // trillion
+  if (x >= 1e9)  return (x / 1e9).toFixed(2)  + 'B×';   // billion
+  if (x >= 1e6)  return (x / 1e6).toFixed(2)  + 'M×';
+  if (x >= 1e3)  return (x / 1e3).toFixed(2)  + 'k×';
+  if (x >= 100)  return x.toFixed(0) + '×';
+  if (x >= 10)   return x.toFixed(1) + '×';
   return x.toFixed(2) + '×';
 }
 
+// Top of admin slider — 10^19 multiplier so a single real second covers
+// roughly 833 quadrillion years of sim time.
+const SPEED_CAP_MAX = 1e19;
+
 function applySpeed(mul) {
-  speedMul = Math.max(0.01, Math.min(5e6, mul));
+  speedMul = Math.max(0.01, Math.min(SPEED_CAP_MAX, mul));
   const sv = document.getElementById('speed-val');
   if (sv) sv.textContent = fmtSpeedMul(speedMul);
   const av = document.getElementById('admin-speed-val');
@@ -4939,24 +6147,62 @@ function applySpeed(mul) {
   const ss = document.getElementById('speed-slider');
   if (ss) {
     const log = Math.log10(speedMul);
-    if (log >= -0.6 && log <= 4) ss.value = log;
+    // Regular slider tops out at 1e11.
+    if (log >= -0.6 && log <= 11) ss.value = log;
   }
   const as = document.getElementById('admin-speed-slider');
   if (as) as.value = Math.log10(speedMul);
 }
 
-// Global speed slider (log scale, 0.25× → 10,000×).
+// Global speed slider (log scale, 0.25× → 100,000,000,000×).
 function setSpeedLog(v) {
   applySpeed(Math.pow(10, parseFloat(v)));
 }
 
-// Admin speed slider (log scale, 0.25× → 5,000,000×).
+// Admin speed slider (log scale, 0.25× → 10,000,000,000,000,000,000×).
 function setAdminSpeed(v) {
   applySpeed(Math.pow(10, parseFloat(v)));
 }
 
 // Back-compat: older saves call setSpeed(numericMul) directly.
 function setSpeed(v) { applySpeed(parseFloat(v)); }
+
+function fmtExagMul(x) {
+  if (x >= 1e6) return (x / 1e6).toFixed(2) + 'M×';
+  if (x >= 1e3) return (x / 1e3).toFixed(2) + 'k×';
+  if (x >= 100) return x.toFixed(0) + '×';
+  if (x >= 10)  return x.toFixed(1) + '×';
+  return x.toFixed(2) + '×';
+}
+
+// Size-exaggeration slider (log scale, 1× → 1,000,000×). Visual-only.
+function setSizeExaggerationLog(v) {
+  sizeExaggeration = Math.max(1, Math.min(1e6, Math.pow(10, parseFloat(v))));
+  const el = document.getElementById('size-exag-val');
+  if (el) el.textContent = fmtExagMul(sizeExaggeration);
+}
+
+// AU rescale — admin UI handlers. Applies a multiplier to the current AU
+// (e.g. 2 doubles AU, 0.5 halves it). The setAuMultiplier function takes
+// care of recomputing G, rescaling bodies/velocities/trails, and adjusting
+// the camera so the view stays roughly the same on screen.
+function adminApplyAuMul() {
+  const input = document.getElementById('admin-au-input');
+  if (!input) return;
+  const k = parseFloat(input.value);
+  if (!isFinite(k) || k <= 0) { input.value = ''; return; }
+  setAuMultiplier(k);
+  input.value = '';
+  refreshAuReadout();
+}
+function adminApplyAuMulFixed(k) {
+  setAuMultiplier(k);
+  refreshAuReadout();
+}
+function refreshAuReadout() {
+  const el = document.getElementById('admin-au-val');
+  if (el) el.textContent = _AU_SIM_UNITS.toFixed(0) + ' sim units';
+}
 
 function toggleVectors() {
   showVectors = !showVectors;
@@ -5058,6 +6304,56 @@ function renameBody(id) {
     triggerMergeFlash();
     buildControls();
     return;
+  }
+
+  // Renaming an existing comet to "Shoemaker-Levy 9" reseats it on an
+  // inbound trajectory toward Jupiter (if a body named "Jupiter" exists).
+  if (b.isComet && SL9_NAME_KEYS.has(_normCometName(trimmed))) {
+    const jupiter = bodies.find(s => (s.name || '').toLowerCase() === 'jupiter');
+    if (jupiter) {
+      const startDist = Math.max(jupiter.radius * 80, _AU_SIM_UNITS * 0.05);
+      const angle = Math.random() * Math.PI * 2;
+      b.x = jupiter.x + Math.cos(angle) * startDist;
+      b.y = jupiter.y + Math.sin(angle) * startDist;
+      const dx = jupiter.x - b.x, dy = jupiter.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const ux = dx / dist, uy = dy / dist;
+      const vEsc = Math.sqrt(2 * G_BASE * jupiter.mass / startDist);
+      const vIn  = vEsc * 0.5;
+      b.vx = jupiter.vx + ux * vIn;
+      b.vy = jupiter.vy + uy * vIn;
+      if (b.z  !== undefined) b.z  = 0;
+      if (b.vz !== undefined) b.vz = 0;
+      b.trail = [];
+      buildControls();
+      return;
+    }
+  }
+
+  // Named-comet rename — reshape orbit to match the real comet's period.
+  // Only applies to existing comets, since we'd otherwise re-purpose
+  // arbitrary bodies into icy snowballs.
+  if (b.isComet && NAMED_COMETS[normName]) {
+    const sun = bodies.find(s => s.isSun);
+    if (sun) {
+      const cfg = NAMED_COMETS[normName];
+      const sunMass = sun.mass;
+      const T  = cfg.periodYears * _EARTH_ORBIT_PERIOD_DT;
+      const a3 = (T * T) * G_BASE * sunMass / (4 * Math.PI * Math.PI);
+      const a  = Math.cbrt(a3);
+      const e  = cfg.eccentricity;
+      const r_apo = a * (1 + e);
+      const v_apo = Math.sqrt(G_BASE * sunMass * (1 - e) / (a * (1 + e)));
+      const angle = Math.random() * Math.PI * 2;
+      b.x  = sun.x + Math.cos(angle) * r_apo;
+      b.y  = sun.y + Math.sin(angle) * r_apo;
+      b.vx = -Math.sin(angle) * v_apo;
+      b.vy =  Math.cos(angle) * v_apo;
+      b.z  = 0; b.vz = 0;
+      b.trail = [];
+      buildControls();
+      return;
+    }
   }
 
   // Earth-like rename → grow continents if it doesn't have them yet
@@ -5398,9 +6694,46 @@ function makeContinents() {
   return continents;
 }
 
+// Lines up every body in the scene edge-to-edge along a horizontal row,
+// ordered smallest → biggest by real radius (visual size exaggeration is
+// not used). Velocities are zeroed, trails wiped, and the camera is fit
+// to the resulting row so the size comparison is visible at a glance.
+// The simulation is paused to keep the lineup intact.
+function adminLineUpBodies() {
+  if (!adminAuthed) return;
+  if (bodies.length === 0) return;
+  const sorted = [...bodies].sort((a, b) => a.radius - b.radius);
+  let totalWidth = 0;
+  for (const b of sorted) totalWidth += b.radius * 2;
+  // Place each body left-to-right, centered on the current camera focus.
+  const cx = viewX, cy = viewY;
+  let cursor = cx - totalWidth / 2;
+  for (const b of sorted) {
+    b.x = cursor + b.radius;
+    b.y = cy;
+    b.vx = 0; b.vy = 0;
+    if (b.z  !== undefined) b.z  = 0;
+    if (b.vz !== undefined) b.vz = 0;
+    b.trail = [];
+    cursor += b.radius * 2;
+  }
+  // Pause so the row holds; user can hit Play to release the line into
+  // mutual gravity if they want to see chaos unfold.
+  if (!paused) togglePause();
+  // Fit the camera to the row.
+  fitCameraToObject(cx, cy, totalWidth / 2);
+  buildControls();
+}
+
 function adminSpawn(kind) {
   if (!adminAuthed) return;
   switch (kind) {
+    case 'halley': {
+      // Real Halley's Comet — 76-year period, e ≈ 0.967. spawnComet() solves
+      // the semi-major axis from the period via Kepler's third law.
+      spawnComet('Halley');
+      return;
+    }
     case 'star': {
       const mass = 1000;
       const r = 28 + Math.cbrt(mass / 1000) * 4;
@@ -5937,8 +7270,22 @@ function renderAdminSection() {
       <div style="font-size:0.7em;color:#7dd3fc;margin-bottom:8px">Signed in as ${adminAuthedEmail || ADMIN_EMAIL}</div>
       <div class="slider-group">
         <div class="slider-label"><span>⏩ Time Warp</span><span class="slider-value" id="admin-speed-val">${fmtSpeedMul(speedMul)}</span></div>
-        <input type="range" id="admin-speed-slider" min="-0.6" max="6.7" step="0.01" value="${speedLog}" oninput="setAdminSpeed(this.value)">
-        <div style="font-size:0.65em;color:#666;margin-top:2px">0.25× → 5,000,000×</div>
+        <input type="range" id="admin-speed-slider" min="-0.6" max="19" step="0.01" value="${speedLog}" oninput="setAdminSpeed(this.value)">
+        <div style="font-size:0.65em;color:#666;margin-top:2px">0.25× → 10,000,000,000,000,000,000×</div>
+      </div>
+      <div class="slider-group">
+        <div class="slider-label"><span>📏 AU Scale</span><span class="slider-value" id="admin-au-val">${_AU_SIM_UNITS.toFixed(0)} sim units</span></div>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <input type="text" id="admin-au-input" placeholder="multiplier (e.g. 0.5, 2)" style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#ccc;border-radius:6px;padding:5px 8px;font-family:'Inter',sans-serif;font-size:0.78em;outline:none">
+          <button class="btn add-btn" onclick="adminApplyAuMul()" style="padding:5px 10px;font-size:0.78em">Apply ×</button>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button class="btn" onclick="adminApplyAuMulFixed(0.1)" style="flex:1;padding:4px;font-size:0.72em">×0.1</button>
+          <button class="btn" onclick="adminApplyAuMulFixed(0.5)" style="flex:1;padding:4px;font-size:0.72em">×0.5</button>
+          <button class="btn" onclick="adminApplyAuMulFixed(2)"   style="flex:1;padding:4px;font-size:0.72em">×2</button>
+          <button class="btn" onclick="adminApplyAuMulFixed(10)"  style="flex:1;padding:4px;font-size:0.72em">×10</button>
+        </div>
+        <div style="font-size:0.65em;color:#666;margin-top:2px">Multiplies current AU. Rescales every body, velocity, trail; G is retuned so orbits keep their 1-year period.</div>
       </div>
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminSpawn('star')">☀ Star</button>
@@ -5958,6 +7305,10 @@ function renderAdminSection() {
       </div>
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminSpawn('forcerocket')">🚀 Launch Rocket</button>
+        <button class="btn add-btn" onclick="adminSpawn('halley')" title="Halley's Comet — 76-year orbital period, eccentricity 0.967. Semi-major axis is solved from the period via Kepler's third law against the current G and Sun mass.">☄ Halley's Comet</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn add-btn" onclick="adminLineUpBodies()" title="Line up every body in the scene edge-to-edge, smallest → biggest. Velocities are zeroed and the simulation is paused so you can size-compare them; press Play to release the line back into gravity." style="grid-column:1/-1;background:rgba(125,211,252,0.12);border-color:rgba(125,211,252,0.3);color:#7dd3fc">📏 Line Up Bodies (smallest → biggest)</button>
       </div>
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminSpawn('redsupergiant')">🔴 Red Super Giant</button>
@@ -6282,6 +7633,7 @@ canvas.addEventListener('mousemove', function(e) {
     const PITCH_LIMIT = Math.PI / 2 - 0.05;
     if (cameraPitch > PITCH_LIMIT) cameraPitch = PITCH_LIMIT;
     if (cameraPitch < -PITCH_LIMIT) cameraPitch = -PITCH_LIMIT;
+    if (typeof syncCameraSliders === 'function') syncCameraSliders();
     return;
   }
 
@@ -6437,7 +7789,9 @@ canvas.addEventListener('mouseleave', function() {
 // Two dropdowns: pick body A and body B to see the gravitational force
 // between exactly those two bodies (not the nearest-neighbor pairing).
 function populateBodySelect() {
-  const opts = bodies.map(b =>
+  // Asteroids are excluded — hundreds of unselectable rocks would bury the
+  // suns and planets the user actually cares about pairing.
+  const opts = bodies.filter(b => !b.isAsteroid).map(b =>
     `<option value="${b.id}">${b.isSun ? '☀' : '✦'} ${b.name}</option>`
   ).join('');
   for (const which of ['a', 'b']) {
