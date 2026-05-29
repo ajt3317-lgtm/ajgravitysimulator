@@ -3478,14 +3478,19 @@ const UFO_ATTACK_MS = 16000;   // sim-time bombarding Earth before retreat
 const UFO_LEAVE_MS  = 9000;    // sim-time retreating before despawn
 const UFO_ROLL_MS   = 20000;   // real-time between invasion rolls
 const UFO_CHANCE    = 0.10;    // 10% chance per roll
+const UFO_INVISIBLE_CHANCE = 0.10; // 10% of invasions are cloaked / undetected
 let _ufoRollAccum   = 0;
 
 // Spawn a wave of saucers from Mars headed for Earth. Returns false if Mars or
 // Earth isn't present. `count` overrides the default 2–4 saucers.
-function spawnUfoInvasion(count) {
+function spawnUfoInvasion(count, invisible) {
   const mars = findMarsBody(), earth = findEarthBody();
   if (!mars || !earth) return false;
   const wr = ufoWorldRadius();
+  // 10% of (random) invasions are CLOAKED: the saucers are invisible and the
+  // detection HUD never warns — Earth just starts taking unexplained laser hits.
+  // Callers can force the state (admin spawn / Watch Aliens force visible).
+  const invis = (typeof invisible === 'boolean') ? invisible : (Math.random() < UFO_INVISIBLE_CHANCE);
   const n = count || (2 + Math.floor(Math.random() * 3));
   for (let i = 0; i < n; i++) {
     const ang = Math.random() * Math.PI * 2;
@@ -3502,6 +3507,7 @@ function spawnUfoInvasion(count) {
       bob: Math.random() * Math.PI * 2,
       hue: 110 + Math.random() * 60,            // light/beam hue: green → cyan
       orbitDir: Math.random() < 0.5 ? 1 : -1,
+      invisible: invis,                         // cloaked → not drawn, not detected
       lastFire: simTime, beamUntil: 0
     });
   }
@@ -3564,9 +3570,9 @@ function drawUfos(t) {
     if (u.beamUntil && simTime < u.beamUntil && earth) {
       const ex = (earth.x - viewX) * viewZoom + w / 2;
       const ey = (earth.y - viewY) * viewZoom + h / 2;
-      drawUfoBeam(sx, sy, ex, ey, screenR, u, t);
+      drawUfoBeam(sx, sy, ex, ey, screenR, u, t);   // beams show even for cloaked craft
     }
-    drawSaucer(sx, sy, screenR, u, t, realisticMode);
+    if (!u.invisible) drawSaucer(sx, sy, screenR, u, t, realisticMode);
   }
 }
 
@@ -3663,14 +3669,25 @@ function drawSaucer(cx, cy, R, u, t, realistic) {
   ctx.restore();
 }
 
-// Transient on-canvas warning while an invasion is active (saucers are tiny in
-// world units, so this tells the user to zoom toward Earth to watch it).
+// Top-of-screen alien HUD: while a DETECTED invasion is active it warns
+// (inbound / attacking); otherwise it counts down to the next invasion roll.
+// Cloaked (invisible) saucers are deliberately excluded from detection, so the
+// HUD keeps showing the calm countdown even as Earth takes hits.
 function drawInvasionBanner(t) {
-  if (!ufos.length) return;
-  const attacking = ufos.some(u => u.state === 'attacking');
   const w = canvas.clientWidth;
-  const msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
-  const pulse = 0.55 + 0.45 * Math.sin(t * 0.2);
+  const detected = ufos.filter(u => !u.invisible);
+  let msg, alpha;
+  if (detected.length) {
+    const attacking = detected.some(u => u.state === 'attacking');
+    msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
+    alpha = 0.55 + 0.45 * Math.sin(t * 0.2);
+  } else if (findMarsBody() && findEarthBody()) {
+    const left = Math.max(0, (UFO_ROLL_MS - _ufoRollAccum) / 1000);
+    msg = `👽 Next alien scan: ${left.toFixed(0)}s · ${Math.round(UFO_CHANCE * 100)}% chance`;
+    alpha = 0.6;
+  } else {
+    return;
+  }
   ctx.save();
   ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
   ctx.font = '700 16px Inter, system-ui, sans-serif';
@@ -3678,7 +3695,7 @@ function drawInvasionBanner(t) {
   const tw = ctx.measureText(msg).width;
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.fillRect(w / 2 - tw / 2 - 12, 10, tw + 24, 28);
-  ctx.fillStyle = `rgba(157,255,60,${pulse})`;
+  ctx.fillStyle = `rgba(157,255,60,${alpha})`;
   ctx.fillText(msg, w / 2, 15);
   ctx.restore();
 }
@@ -5829,6 +5846,7 @@ let viewZoom = 1;             // 1 = default; >1 zooms in
 let autoFollow = true;
 let lockTargetId = null;   // camera-lock: when set, the view re-centers on this body every frame
 let followRocket = false;  // when on, the camera follows the first rocket each frame
+let watchAliens = false;   // when on, the camera frames Earth + the attacking saucers
 
 // ---- 3D Mode ----
 // When is3D is true, bodies carry z + vz and rendering applies a perspective
@@ -6055,6 +6073,26 @@ function loop(t) {
     viewZoom += (targetZoom - viewZoom) * 0.15;        // smooth zoom-in to ~80%
   } else if (followRocket && !rockets.length) {
     followRocket = false;    // nothing left to follow
+  } else if (watchAliens && ufos.length) {
+    // Frame Earth (centred) with the saucers + their beams in view so the attack
+    // is watchable. Fits at least the attack ring, but pulls out to keep the
+    // nearest visible saucer on-screen too — so incoming craft track in smoothly.
+    const earth = findEarthBody();
+    if (earth) {
+      viewX = earth.x; viewY = earth.y;
+      let need = earth.radius + ufoWorldRadius() * 9;       // min frame = attack ring + margin
+      let nearest = Infinity;
+      for (const u of ufos) {
+        if (u.invisible) continue;
+        const d = Math.hypot(u.x - earth.x, u.y - earth.y);
+        if (d < nearest) nearest = d;
+      }
+      if (isFinite(nearest)) need = Math.max(need, nearest + ufoWorldRadius() * 2);
+      const targetZoom = 0.35 * Math.min(w, h) / Math.max(need, 1e-6);
+      viewZoom += (targetZoom - viewZoom) * 0.12;
+    } else { watchAliens = false; }
+  } else if (watchAliens && !ufos.length) {
+    watchAliens = false;     // invasion over — release
   } else if (lockTargetId) {
     const target = bodies.find(b => b.id === lockTargetId);
     if (target) {
@@ -7656,9 +7694,32 @@ function toggleFollowRocket() {
     followRocket = true;
     lockTargetId = null;
     autoFollow = false;
+    if (watchAliens) { watchAliens = false; const wb = document.getElementById('btn-watch-aliens'); if (wb) wb.classList.remove('active'); }
   }
   const btn = document.getElementById('btn-follow-rocket');
   if (btn) btn.classList.toggle('active', followRocket);
+}
+
+// Camera that frames Earth + the attacking saucers so you can watch the assault.
+// Starts a (visible) invasion if none is happening, then keeps it framed.
+function toggleWatchAliens() {
+  if (watchAliens) {
+    watchAliens = false;
+  } else {
+    if (!ufos.some(u => !u.invisible)) {   // nothing visible to watch → summon a wave
+      if (!spawnUfoInvasion(undefined, false)) {
+        alert('Need both Mars and Earth in the scene to watch an alien attack.');
+        return;
+      }
+    }
+    watchAliens = true;
+    followRocket = false;
+    lockTargetId = null;
+    autoFollow = false;
+    const fb = document.getElementById('btn-follow-rocket'); if (fb) fb.classList.remove('active');
+  }
+  const btn = document.getElementById('btn-watch-aliens');
+  if (btn) btn.classList.toggle('active', watchAliens);
 }
 
 // Show a picker modal listing every other body; clicking one runs setOrbit.
@@ -8855,6 +8916,7 @@ function recenterView() {
   autoFollow = true;
   lockTargetId = null;   // recenter releases any camera lock
   if (followRocket) { followRocket = false; const fb = document.getElementById('btn-follow-rocket'); if (fb) fb.classList.remove('active'); }
+  if (watchAliens) { watchAliens = false; const wb = document.getElementById('btn-watch-aliens'); if (wb) wb.classList.remove('active'); }
   // Zoom to fit the most distant non-galaxy body (with margin) so the AU-scale
   // solar system is visible by default. Falls back to 1× when there's nothing
   // to fit (e.g. fresh empty scene).
@@ -9066,6 +9128,7 @@ canvas.addEventListener('mousedown', function(e) {
   panning = true;
   autoFollow = false;
   if (followRocket) { followRocket = false; const fb = document.getElementById('btn-follow-rocket'); if (fb) fb.classList.remove('active'); }
+  if (watchAliens) { watchAliens = false; const wb = document.getElementById('btn-watch-aliens'); if (wb) wb.classList.remove('active'); }
   panStartX = e.clientX;
   panStartY = e.clientY;
   panStartViewX = viewX;
