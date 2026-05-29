@@ -36,6 +36,7 @@ let bodies = [];
 let stars = [];
 let mergeEffects = [];
 let rockets = [];
+let ufos = [];     // Martian invasion saucers (transient, not gravity-simulated, not saved)
 let galaxies = []; // visual-only galaxies, each { x, y, radius, rotation, centerBodyId }
 let paused = false;
 let showTrails = true;
@@ -3455,6 +3456,233 @@ function drawRockets(t) {
   for (const r of rockets) drawSingleRocket(r, t);
 }
 
+// ---- Martian UFOs / alien invasions ----
+// A periodic 10% roll (see the main loop) spawns a wave of flying saucers from
+// Mars that cruise to Earth and bombard it with laser beams (visual). Realistic
+// mode draws a metallic saucer; otherwise a flat cartoon disc. Like rockets,
+// UFOs live outside `bodies` (no gravity integration) and aren't saved.
+function findEarthBody() {
+  return bodies.find(b => !b.isSun && EARTH_NAMES.has((b.name || '').trim().toLowerCase()));
+}
+function findMarsBody() {
+  return bodies.find(b => !b.isSun && (b.name || '').trim().toLowerCase() === 'mars');
+}
+// Saucer world size, tied to Earth so it reads as a craft beside the planet
+// (Earth's radius is tiny in sim units), with a floor so it's never degenerate.
+function ufoWorldRadius() {
+  const e = findEarthBody();
+  return Math.max(0.08, (e ? e.radius : 0.2564) * 0.6);
+}
+
+const UFO_ATTACK_MS = 16000;   // sim-time bombarding Earth before retreat
+const UFO_LEAVE_MS  = 9000;    // sim-time retreating before despawn
+const UFO_ROLL_MS   = 20000;   // real-time between invasion rolls
+const UFO_CHANCE    = 0.10;    // 10% chance per roll
+let _ufoRollAccum   = 0;
+
+// Spawn a wave of saucers from Mars headed for Earth. Returns false if Mars or
+// Earth isn't present. `count` overrides the default 2–4 saucers.
+function spawnUfoInvasion(count) {
+  const mars = findMarsBody(), earth = findEarthBody();
+  if (!mars || !earth) return false;
+  const wr = ufoWorldRadius();
+  const n = count || (2 + Math.floor(Math.random() * 3));
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const off = mars.radius + wr * (3 + Math.random() * 5);
+    const x = mars.x + Math.cos(ang) * off, y = mars.y + Math.sin(ang) * off;
+    const dx = earth.x - x, dy = earth.y - y, d = Math.hypot(dx, dy) || 1;
+    const sp = 0.6 + Math.random() * 0.4;
+    ufos.push({
+      x, y,
+      vx: (mars.vx || 0) + dx / d * sp,
+      vy: (mars.vy || 0) + dy / d * sp,
+      heading: Math.atan2(dy, dx),
+      state: 'incoming', stateAtSim: simTime,
+      bob: Math.random() * Math.PI * 2,
+      hue: 110 + Math.random() * 60,            // light/beam hue: green → cyan
+      orbitDir: Math.random() < 0.5 ? 1 : -1,
+      lastFire: simTime, beamUntil: 0
+    });
+  }
+  return true;
+}
+
+function updateUfos(dtUnits) {
+  if (!ufos.length) return;
+  const earth = findEarthBody();
+  const wr = ufoWorldRadius();
+  const standoff = (earth ? earth.radius : 1) + wr * 7;
+  const bobStep = 0.10 * Math.min(Math.max(dtUnits, 0.2), 6);
+  for (let i = ufos.length - 1; i >= 0; i--) {
+    const u = ufos[i];
+    u.bob += bobStep;
+    if (!earth && u.state !== 'leaving') { u.state = 'leaving'; u.stateAtSim = simTime; }
+
+    if (u.state === 'incoming' && earth) {
+      const dx = earth.x - u.x, dy = earth.y - u.y, d = Math.hypot(dx, dy) || 1;
+      u.vx = (earth.vx || 0) + dx / d;            // engine seek toward Earth
+      u.vy = (earth.vy || 0) + dy / d;
+      u.heading = Math.atan2(dy, dx);
+      if (d < standoff * 1.15) { u.state = 'attacking'; u.stateAtSim = simTime; u.lastFire = simTime; }
+    } else if (u.state === 'attacking' && earth) {
+      const dx = earth.x - u.x, dy = earth.y - u.y, d = Math.hypot(dx, dy) || 1;
+      const ux = dx / d, uy = dy / d;
+      const tx = -uy * u.orbitDir, ty = ux * u.orbitDir;   // tangential → orbit Earth
+      const radialErr = d - standoff;
+      u.vx = (earth.vx || 0) + ux * radialErr * 0.08 + tx * 0.45;
+      u.vy = (earth.vy || 0) + uy * radialErr * 0.08 + ty * 0.45;
+      u.heading = Math.atan2(dy, dx);
+      if (simTime - u.lastFire > 1100) {          // periodic laser strike + impact flash
+        u.lastFire = simTime;
+        u.beamUntil = simTime + 400;
+        spawnMergeEffect(earth.x - ux * earth.radius, earth.y - uy * earth.radius, '#9dff3c');
+      }
+      if (simTime - u.stateAtSim > UFO_ATTACK_MS) { u.state = 'leaving'; u.stateAtSim = simTime; }
+    } else if (u.state === 'leaving') {
+      let ax, ay;
+      if (earth) { const dx = u.x - earth.x, dy = u.y - earth.y, d = Math.hypot(dx, dy) || 1; ax = dx / d; ay = dy / d; }
+      else { const s = Math.hypot(u.vx, u.vy) || 1; ax = u.vx / s; ay = u.vy / s; }
+      u.vx = ax * 1.7; u.vy = ay * 1.7;
+      u.heading = Math.atan2(u.vy, u.vx);
+      if (simTime - u.stateAtSim > UFO_LEAVE_MS) { ufos.splice(i, 1); continue; }
+    }
+    u.x += u.vx * dtUnits;
+    u.y += u.vy * dtUnits;
+  }
+}
+
+function drawUfos(t) {
+  if (!ufos.length) return;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const earth = findEarthBody();
+  const screenR = ufoWorldRadius() * viewZoom;
+  if (screenR < 0.5) return;          // sub-pixel when zoomed out — the banner still warns
+  for (const u of ufos) {
+    const sx = (u.x - viewX) * viewZoom + w / 2;
+    const sy = (u.y - viewY) * viewZoom + h / 2;
+    if (u.beamUntil && simTime < u.beamUntil && earth) {
+      const ex = (earth.x - viewX) * viewZoom + w / 2;
+      const ey = (earth.y - viewY) * viewZoom + h / 2;
+      drawUfoBeam(sx, sy, ex, ey, screenR, u, t);
+    }
+    drawSaucer(sx, sy, screenR, u, t, realisticMode);
+  }
+}
+
+// Laser beam from a saucer's emitter down to its impact point on Earth. Screen
+// coords; additive so it glows. Tapered cone + bright core + impact bloom.
+function drawUfoBeam(sx, sy, ex, ey, R, u, t) {
+  const flick = 0.6 + 0.4 * Math.sin(t * 0.4 + u.bob);
+  const col = (a) => `hsla(${u.hue | 0},100%,60%,${a})`;
+  const ang = Math.atan2(ey - sy, ex - sx), perp = ang + Math.PI / 2;
+  const wCore = Math.max(1, R * 0.16), wOuter = R * 0.55;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.beginPath();
+  ctx.moveTo(sx + Math.cos(perp) * wCore, sy + Math.sin(perp) * wCore);
+  ctx.lineTo(sx - Math.cos(perp) * wCore, sy - Math.sin(perp) * wCore);
+  ctx.lineTo(ex - Math.cos(perp) * wOuter, ey - Math.sin(perp) * wOuter);
+  ctx.lineTo(ex + Math.cos(perp) * wOuter, ey + Math.sin(perp) * wOuter);
+  ctx.closePath();
+  ctx.fillStyle = col(0.18 * flick); ctx.fill();
+  ctx.strokeStyle = col(0.9 * flick); ctx.lineWidth = wCore;
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+  const ig = ctx.createRadialGradient(ex, ey, 0, ex, ey, R * 1.4);
+  ig.addColorStop(0, col(0.9 * flick)); ig.addColorStop(1, col(0));
+  ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(ex, ey, R * 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// A flying saucer centred at screen (cx,cy), body radius R px. `realistic` →
+// metallic hull + glass dome + pulsing rim lights; else a flat cartoon disc.
+function drawSaucer(cx, cy, R, u, t, realistic) {
+  cy += Math.sin(u.bob) * R * 0.12;                 // hover bob
+  const hullW = R * 2.6, hullH = R * 0.78, domeR = R * 0.82;
+  const hue = u.hue | 0;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.translate(cx, cy);
+  ctx.rotate(0.05 * Math.sin(u.bob * 0.5));         // subtle banking wobble
+
+  if (realistic) {
+    let g = ctx.createRadialGradient(0, 0, 0, 0, 0, hullW * 0.8);   // outer glow
+    g.addColorStop(0, `hsla(${hue},90%,70%,0.16)`); g.addColorStop(1, `hsla(${hue},90%,70%,0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 0, hullW * 0.8, hullH * 1.4, 0, 0, Math.PI * 2); ctx.fill();
+
+    const emA = 0.5 + 0.3 * Math.sin(t * 0.3 + u.bob);              // underside emitter
+    g = ctx.createRadialGradient(0, hullH * 0.25, 0, 0, hullH * 0.25, R);
+    g.addColorStop(0, `hsla(${hue},100%,65%,${emA})`); g.addColorStop(1, `hsla(${hue},100%,65%,0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, hullH * 0.25, R * 0.9, R * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+
+    g = ctx.createLinearGradient(0, -hullH, 0, hullH);             // metallic hull
+    g.addColorStop(0, '#6b7280'); g.addColorStop(0.42, '#e9eef5');
+    g.addColorStop(0.55, '#aab2bd'); g.addColorStop(1, '#3a3f47');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 0, hullW / 2, hullH / 2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(20,24,30,0.5)'; ctx.lineWidth = Math.max(0.6, R * 0.05);
+    ctx.beginPath(); ctx.ellipse(0, 0, hullW / 2 * 0.98, hullH / 2 * 0.7, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = Math.max(0.5, R * 0.04);
+    ctx.beginPath(); ctx.ellipse(0, -hullH * 0.06, hullW / 2 * 0.96, hullH / 2 * 0.85, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
+
+    const nL = 7;                                                  // pulsing rim lights
+    for (let k = 0; k < nL; k++) {
+      const lx = -hullW / 2 * 0.82 + (k / (nL - 1)) * hullW * 0.82;
+      const pulse = 0.4 + 0.6 * Math.abs(Math.sin(t * 0.25 + k * 0.9 + u.bob));
+      ctx.fillStyle = `hsla(${hue},100%,${55 + 20 * pulse}%,${0.5 + 0.5 * pulse})`;
+      ctx.beginPath(); ctx.arc(lx, hullH * 0.16, Math.max(0.8, R * 0.1), 0, Math.PI * 2); ctx.fill();
+    }
+
+    g = ctx.createRadialGradient(-domeR * 0.3, -hullH * 0.1 - domeR * 0.5, 0, 0, -hullH * 0.1, domeR);
+    g.addColorStop(0, 'rgba(220,245,255,0.95)'); g.addColorStop(0.5, 'rgba(120,200,235,0.6)');
+    g.addColorStop(1, 'rgba(40,90,130,0.35)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, -hullH * 0.1, domeR, domeR * 0.95, 0, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = Math.max(0.5, R * 0.05);
+    ctx.beginPath(); ctx.arc(-domeR * 0.15, -hullH * 0.1 - domeR * 0.05, domeR * 0.6, Math.PI * 1.15, Math.PI * 1.6); ctx.stroke();
+  } else {
+    ctx.fillStyle = `hsla(${hue},90%,55%,0.25)`;                    // underglow
+    ctx.beginPath(); ctx.ellipse(0, hullH * 0.3, R * 0.9, R * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#aeb6c2';
+    ctx.beginPath(); ctx.ellipse(0, 0, hullW / 2, hullH / 2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#7d8794';
+    ctx.beginPath(); ctx.ellipse(0, hullH * 0.12, hullW / 2 * 0.96, hullH / 2 * 0.8, 0, 0, Math.PI); ctx.fill();
+    ctx.fillStyle = '#bfe6ff';
+    ctx.beginPath(); ctx.ellipse(0, -hullH * 0.1, domeR, domeR * 0.9, 0, Math.PI, 0); ctx.fill();
+    const nL = 5;
+    for (let k = 0; k < nL; k++) {
+      const lx = -hullW / 2 * 0.7 + (k / (nL - 1)) * hullW * 0.7;
+      const pulse = Math.abs(Math.sin(t * 0.2 + k + u.bob));
+      ctx.fillStyle = `hsla(${(hue + k * 40) % 360},100%,60%,${0.5 + 0.5 * pulse})`;
+      ctx.beginPath(); ctx.arc(lx, hullH * 0.18, Math.max(0.8, R * 0.11), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// Transient on-canvas warning while an invasion is active (saucers are tiny in
+// world units, so this tells the user to zoom toward Earth to watch it).
+function drawInvasionBanner(t) {
+  if (!ufos.length) return;
+  const attacking = ufos.some(u => u.state === 'attacking');
+  const w = canvas.clientWidth;
+  const msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
+  const pulse = 0.55 + 0.45 * Math.sin(t * 0.2);
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.font = '700 16px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const tw = ctx.measureText(msg).width;
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(w / 2 - tw / 2 - 12, 10, tw + 24, 28);
+  ctx.fillStyle = `rgba(157,255,60,${pulse})`;
+  ctx.fillText(msg, w / 2, 15);
+  ctx.restore();
+}
+
 // ---- Rendering ----
 function drawStars(t) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -5792,6 +6020,17 @@ function loop(t) {
     updateMTypeStars();
     updateKSuperGiantStars();
     updateRockets(speedMul);
+    updateUfos(speedMul);
+    // Periodic 10% chance of a Martian invasion. Rolled on a fixed REAL-time
+    // cadence (not warp-scaled, so fast-forward doesn't spam them), and only
+    // when Mars + Earth exist and no saucers are already active.
+    _ufoRollAccum += realDt;
+    if (_ufoRollAccum >= UFO_ROLL_MS) {
+      _ufoRollAccum = 0;
+      if (!ufos.length && findMarsBody() && findEarthBody() && Math.random() < UFO_CHANCE) {
+        spawnUfoInvasion();
+      }
+    }
     trackEarthOrbits();
   }
   // Zoom-check runs every frame (even paused) so it works while inspecting
@@ -6031,7 +6270,9 @@ function loop(t) {
     }
 
     drawRockets(animTime);
+    drawUfos(animTime);
     drawMergeEffects();
+    drawInvasionBanner(animTime);
 
     const drawSelRing = (b, color) => {
       ctx.save();
@@ -7930,6 +8171,10 @@ function adminLineUpBodies() {
 function adminSpawn(kind) {
   if (!adminAuthed) return;
   switch (kind) {
+    case 'ufo': {
+      if (!spawnUfoInvasion()) alert('Need both Mars and Earth in the scene for a Martian invasion.');
+      return;
+    }
     case 'halley': {
       // Real Halley's Comet — 76-year period, e ≈ 0.967. spawnComet() solves
       // the semi-major axis from the period via Kepler's third law.
@@ -8508,6 +8753,9 @@ function renderAdminSection() {
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminSpawn('forcerocket')">🚀 Launch Rocket</button>
         <button class="btn add-btn" onclick="adminSpawn('halley')" title="Halley's Comet — 76-year orbital period, eccentricity 0.967. Semi-major axis is solved from the period via Kepler's third law against the current G and Sun mass.">☄ Halley's Comet</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn add-btn" onclick="adminSpawn('ufo')" title="Spawn a wave of Martian flying saucers that fly from Mars to Earth and bombard it with laser beams. Needs both Mars and Earth in the scene. (There's also a random 10% chance per ~20s for an invasion on its own.)">🛸 Spawn UFO</button>
       </div>
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminLineUpBodies()" title="Line up every body in the scene edge-to-edge, smallest → biggest. Velocities are zeroed and the simulation is paused so you can size-compare them; press Play to release the line back into gravity." style="grid-column:1/-1;background:rgba(125,211,252,0.12);border-color:rgba(125,211,252,0.3);color:#7dd3fc">📏 Line Up Bodies (smallest → biggest)</button>
