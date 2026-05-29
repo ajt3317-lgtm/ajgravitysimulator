@@ -138,6 +138,7 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
           <button class="btn" id="btn-realistic" onclick="toggleRealisticMode()" title="Render the Sun and any planet named Mercury / Venus / Earth / Mars / Jupiter / Saturn / Uranus / Neptune / Pluto with a textured, photo-inspired look. Rename a body to one of those names to apply it.">🌍 Realistic</button>
           <button class="btn" id="btn-recenter" onclick="recenterView()" title="Snap the camera back to follow the primary sun and reset zoom to 1×. Use this if you panned/zoomed and lost the scene.">⌖ Recenter</button>
           <button class="btn" id="btn-3d" onclick="toggleThreeD()" title="Toggle 3D mode. In 3D, bodies have a z-axis and the camera can be tilted/rotated with right-click drag (or Shift + drag). The default solar system orbits in the z=0 plane until you give bodies vertical motion.">🌐 3D</button>
+          <button class="btn" id="btn-follow-rocket" onclick="toggleFollowRocket()" title="Follow a rocket with the camera, keeping it centred so you can watch its journey between planets. Rockets launch from Earth-like planets. Click again to release.">🚀 Follow Rocket</button>
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Speed</span><span class="slider-value" id="speed-val">1.00×</span></div>
@@ -151,7 +152,7 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Tilt</span><span class="slider-value" id="tilt-val">0°</span></div>
-          <input type="range" id="tilt-slider" min="-85" max="85" step="1" value="0" oninput="setCameraTiltDeg(this.value)" title="Pitch the camera up or down. Setting any tilt automatically enables 3D mode so the scene renders with perspective.">
+          <input type="range" id="tilt-slider" min="-90" max="90" step="1" value="0" oninput="setCameraTiltDeg(this.value)" title="Pitch the camera up or down (to a full 90° edge-on view). Setting any tilt automatically enables 3D mode so the scene renders with perspective.">
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Rotate</span><span class="slider-value" id="yaw-val">0°</span></div>
@@ -171,13 +172,20 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
         <div class="section-title">Planets</div>
         <div class="btn-row">
           <button class="btn add-btn" onclick="addPlanet()" title="Spawn a planet orbiting a nearby sun. Mass 0.1–50 = planet, 50–79 = dwarf star. Merge enough dwarf stars together (>79) and a real star ignites.">+ Add Planet</button>
-          <button class="btn add-btn" onclick="addMoon()" title="Spawn a small moon around a nearby planet. Moons inherit their parent's orbit and add a second tier of gravitational interaction.">🌑 Add Moon</button>
           <button class="btn add-btn" onclick="addAsteroidBelt()" title="Spawn 200 tiny rocks in a belt between 2.2 and 3.2 AU from the primary sun. They're nearly massless, don't get trails, and are hidden from the body list to keep things uncluttered.">☄ Add Asteroid Belt</button>
           <button class="btn reset-btn" onclick="removeAsteroidBelt()" title="Remove every asteroid currently in the scene. Suns, planets, and moons are kept.">✕ Remove Asteroids</button>
           <button class="btn add-btn" onclick="addComet()" title="Spawn a single comet on an eccentric oval orbit. Mass 5×10⁹–5×10¹² kg, body 0.5–10 km, tail 1 AU pointing away from the nearest sun.">☄ Spawn Comet</button>
           <button class="btn reset-btn" onclick="removeComets()" title="Remove every comet currently in the scene.">✕ Remove Comets</button>
         </div>
         <div id="planet-controls"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Moons</div>
+        <div class="btn-row">
+          <button class="btn add-btn" onclick="addMoon()" title="Spawn a small moon around a nearby planet. Moons inherit their parent's orbit and add a second tier of gravitational interaction. Adjust a moon's mass from its card below.">🌑 Add Moon</button>
+        </div>
+        <div id="moon-controls"></div>
       </div>
 
       <div class="section" id="creator-section">

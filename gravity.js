@@ -23,7 +23,7 @@ const TRAIL_LEN = 8000;
 // (smoothest, but more line segments). The expensive part was the old per-step
 // .shift() — with that gone, rendering every sample is cheap enough.
 const TRAIL_RENDER_STRIDE = 1;
-const STAR_COUNT = 160;
+const STAR_COUNT = 700;
 // Rendering resolution cap. Many displays advertise DPR 2-3, which means the
 // canvas internally rasterizes 4-9× as many pixels per frame. Capping at 1.5
 // keeps the image sharp without paying the full HD/retina cost.
@@ -180,6 +180,64 @@ function initStars() {
 initStars();
 
 // ---- Default bodies ----
+// Tilt an in-ecliptic-plane vector (vx, vy, z=0) out of the plane by `incRad`,
+// hinged on the ascending-node axis at longitude `nodeRad`. Rodrigues rotation
+// about the unit axis n=(cos node, sin node, 0). Used to incline planet orbits:
+// applied to both the position-relative-to-Sun and the velocity, it rotates the
+// whole orbital plane while preserving distance and speed (so the orbit stays
+// valid, just tilted). Returns the 3D vector.
+function _tiltInPlaneVec(vx, vy, incRad, nodeRad) {
+  const nx = Math.cos(nodeRad), ny = Math.sin(nodeRad);
+  const ndotv = nx * vx + ny * vy;
+  const c = Math.cos(incRad), s = Math.sin(incRad);
+  return {
+    x: vx * c + nx * ndotv * (1 - c),
+    y: vy * c + ny * ndotv * (1 - c),
+    z: (nx * vy - ny * vx) * s
+  };
+}
+
+// Real orbital inclinations (to the ecliptic) and ascending-node longitudes, in
+// degrees. Earth defines the ecliptic (inclination 0). These are subtle (max 7°,
+// Pluto 17°) — visible when the camera is tilted or in 3D mode, flat from
+// straight-down 2D — exactly as in real life.
+const ORBIT_INCLINATION = {
+  Mercury: 7.00, Venus: 3.39, Earth: 0.00, Mars: 1.85,
+  Jupiter: 1.30, Saturn: 2.49, Uranus: 0.77, Neptune: 1.77, Pluto: 17.16
+};
+const ORBIT_NODE = {
+  Mercury: 48.3, Venus: 76.7, Earth: 0.0, Mars: 49.6,
+  Jupiter: 100.5, Saturn: 113.7, Uranus: 74.0, Neptune: 131.8, Pluto: 110.3
+};
+
+// Distance (sim units) at which a moon of `parentMass` has the given orbital
+// PERIOD, via Kepler's third law (a³ = G·M·T²/4π²). Real famous moons (Phobos
+// 7.6 h, Io 1.8 d, …) orbit far too fast for the month/sec timestep to resolve —
+// they'd be flung off — so we place each at a stable multi-day period instead,
+// keeping their real ORDER (inner→outer) and sizes. 1 yr = _EARTH_ORBIT_PERIOD_DT.
+function moonDistForPeriod(parentMass, periodDays) {
+  const T = (periodDays / 365.25) * _EARTH_ORBIT_PERIOD_DT;
+  return Math.cbrt(G_BASE * parentMass * T * T / (4 * Math.PI * Math.PI));
+}
+
+// Famous moons. `period` (days) is chosen for numerical stability (~Earth-Moon
+// scale) while preserving real ordering — real periods (Phobos 7.6 h …) are far
+// too fast for the timestep. `radiusKm` and `massKg` are the REAL values, scaled
+// to sim units exactly like the planets (Sun = 695,700 km radius → 28 sim units,
+// 1.989e30 kg → 1000 sim mass). So tiny moons like Phobos really are tiny specks
+// (use the size-exaggeration slider to inspect them).
+const FAMOUS_MOONS = [
+  { parent: 'Mars',    name: 'Phobos',   period: 12, radiusKm: 11.27,  massKg: 1.0659e16, color: '#8a8278' },
+  { parent: 'Mars',    name: 'Deimos',   period: 20, radiusKm: 6.2,    massKg: 1.4762e15, color: '#9a9082' },
+  { parent: 'Jupiter', name: 'Io',       period: 13, radiusKm: 1821.6, massKg: 8.9319e22, color: '#e6d878' },
+  { parent: 'Jupiter', name: 'Europa',   period: 18, radiusKm: 1560.8, massKg: 4.7998e22, color: '#d8cab0' },
+  { parent: 'Jupiter', name: 'Ganymede', period: 25, radiusKm: 2634.1, massKg: 1.4819e23, color: '#9a8c7a' },
+  { parent: 'Jupiter', name: 'Callisto', period: 35, radiusKm: 2410.3, massKg: 1.0759e23, color: '#6e6256' },
+  { parent: 'Saturn',  name: 'Titan',    period: 22, radiusKm: 2574.7, massKg: 1.3452e23, color: '#e0a850' },
+  { parent: 'Neptune', name: 'Triton',   period: 16, radiusKm: 1353.4, massKg: 2.139e22,  color: '#cbb8b0' },
+  { parent: 'Pluto',   name: 'Charon',   period: 12, radiusKm: 606,    massKg: 1.586e21,  color: '#9a9690' }
+];
+
 function createDefaultBodies() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   const cx = w / 2, cy = h / 2;
@@ -219,16 +277,27 @@ function createDefaultBodies() {
     { name: 'Pluto',   dist: AU * 39.48, mass: SUN_MASS / 145_000_000, color: '#a89080' }  // 1:145M
   ];
 
+  let earthRef = null;
+  const planetRefs = {};
   for (const p of planets) {
     const angle = Math.random() * Math.PI * 2;
     const orbitalV = Math.sqrt(G_BASE * 1000 / p.dist);
+    // Tilt the orbital plane by the planet's real inclination (about its
+    // ascending node). Rotating both position and velocity keeps the orbit
+    // circular and valid — just inclined out of the ecliptic.
+    const incRad  = (ORBIT_INCLINATION[p.name] || 0) * Math.PI / 180;
+    const nodeRad = (ORBIT_NODE[p.name] || 0) * Math.PI / 180;
+    const pos = _tiltInPlaneVec(Math.cos(angle) * p.dist, Math.sin(angle) * p.dist, incRad, nodeRad);
+    const vel = _tiltInPlaneVec(-Math.sin(angle) * orbitalV, Math.cos(angle) * orbitalV, incRad, nodeRad);
     const planet = {
       id: 'planet-' + (nextPlanetId++),
       name: p.name, isSun: false,
-      x: cx + Math.cos(angle) * p.dist,
-      y: cy + Math.sin(angle) * p.dist,
-      vx: -Math.sin(angle) * orbitalV,
-      vy: Math.cos(angle) * orbitalV,
+      x: cx + pos.x,
+      y: cy + pos.y,
+      z: pos.z,
+      vx: vel.x,
+      vy: vel.y,
+      vz: vel.z,
       mass: p.mass,
       // Real Sun:planet radius ratio × Sun's sim radius. Falls back to the
       // mass-based formula for any planet name not in the lookup.
@@ -240,6 +309,57 @@ function createDefaultBodies() {
     };
     bodies.push(planet);
     applyEarthFeatures(planet);
+    planetRefs[p.name] = planet;
+    if (p.name === 'Earth') earthRef = planet;
+  }
+
+  // The Moon — per the real figures:
+  //   • 384,400 km from Earth = 0.0025696 AU (this sim's Kepler tuning also
+  //     makes that distance give the real ~27-day orbital period);
+  //   • diameter = 27% of Earth's  → radius = 0.27 × Earth's radius;
+  //   • mass     = 1.23% of Earth's → 0.0123 × Earth's mass.
+  // Circular velocity is added on top of Earth's so the Moon tracks Earth.
+  if (earthRef) {
+    const moonDist = _AU_SIM_UNITS * (384400 / 149597870.7); // 384,400 km in AU
+    const mAngle = Math.random() * Math.PI * 2;
+    const moonOrbV = Math.sqrt(G_BASE * earthRef.mass / moonDist);
+    bodies.push({
+      id: 'planet-' + (nextPlanetId++),
+      name: 'Moon', isSun: false, isMoon: true,
+      moonDepth: 1, rootPlanetName: 'Earth',
+      x: earthRef.x + Math.cos(mAngle) * moonDist,
+      y: earthRef.y + Math.sin(mAngle) * moonDist,
+      vx: earthRef.vx - Math.sin(mAngle) * moonOrbV,
+      vy: earthRef.vy + Math.cos(mAngle) * moonOrbV,
+      mass: earthRef.mass * 0.0123,
+      radius: earthRef.radius * 0.27,
+      color: '#b8b2a8', trail: [], velMul: 1
+    });
+  }
+
+  // Famous moons of the other planets (Phobos/Deimos, the Galileans, Titan,
+  // Triton, Charon). Each orbits its parent at a stable Kepler distance derived
+  // from a chosen multi-day period, sharing the parent's out-of-plane motion.
+  for (const m of FAMOUS_MOONS) {
+    const parent = planetRefs[m.parent];
+    if (!parent) continue;
+    const dist = moonDistForPeriod(parent.mass, m.period);
+    const ang = Math.random() * Math.PI * 2;
+    const orbV = Math.sqrt(G_BASE * parent.mass / dist);
+    bodies.push({
+      id: 'planet-' + (nextPlanetId++),
+      name: m.name, isSun: false, isMoon: true,
+      moonDepth: 1, rootPlanetName: m.parent,
+      x: parent.x + Math.cos(ang) * dist,
+      y: parent.y + Math.sin(ang) * dist,
+      z: parent.z || 0,
+      vx: parent.vx - Math.sin(ang) * orbV,
+      vy: parent.vy + Math.cos(ang) * orbV,
+      vz: parent.vz || 0,
+      mass: 1000 * (m.massKg / 1.989e30),       // real mass → sim units (Sun=1000)
+      radius: 28 * (m.radiusKm / 695700),        // real radius → sim units (Sun=28)
+      color: m.color, trail: [], velMul: 1
+    });
   }
 }
 
@@ -611,16 +731,16 @@ function isPlutoLike(planet) {
 }
 
 // Tombaugh Regio — the light-brown heart-shaped feature on Pluto's surface.
-function drawPlutoHeart(b) {
+function drawPlutoHeart(b, cx = b.x, cy = b.y) {
   const r = b.radius;
   ctx.save();
   // Clip to the planet disc so the heart can't overflow
   ctx.beginPath();
-  ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.clip();
   // Heart center sits slightly south of the planet center
-  const hx = b.x;
-  const hy = b.y + r * 0.10;
+  const hx = cx;
+  const hy = cy + r * 0.10;
   const s  = r * 0.55; // overall heart size
   ctx.fillStyle = '#8e6843';
   ctx.beginPath();
@@ -950,8 +1070,379 @@ function updateBetelgeuseRadii() {
 
 const REALISTIC_NAMES = new Set([
   'sun', 'mercury', 'venus', 'earth', 'mars',
-  'jupiter', 'saturn', 'uranus', 'neptune', 'pluto'
+  'jupiter', 'saturn', 'uranus', 'neptune', 'pluto', 'moon'
 ]);
+
+// Generic crossorigin texture cache (jsDelivr serves the three.js examples
+// with CORS headers, so the canvas stays untainted).
+const _texCache = {};
+function loadTex(url) {
+  if (_texCache[url]) return _texCache[url];
+  const img = new Image();
+  // crossOrigin='anonymous' is required for remote CDN textures (so the canvas
+  // isn't tainted). For LOCAL files (relative paths bundled with the app) we must
+  // NOT set it: under file:// the CORS check would fail the load, and same-origin
+  // images never taint anyway — and we only drawImage these, never read pixels.
+  if (/^https?:/i.test(url)) img.crossOrigin = 'anonymous';
+  img.src = url;
+  _texCache[url] = img;
+  return img;
+}
+// Real 2K Moon photo map (Solar System Scope, via KyleGough/solar-system on
+// jsDelivr — CORS-enabled). 2048×1024 — double the old 1024 map, so it stays
+// crisp when zoomed, with clear maria and bright ray craters (Tycho/Copernicus).
+const MOON_TEX_URL = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/moon.jpg';
+// Real Venus RADAR SURFACE map (Magellan-derived, via the threex.planets repo
+// on jsDelivr — CORS-enabled). This is the actual surface-under-the-clouds view.
+const VENUS_TEX_URL = 'https://cdn.jsdelivr.net/gh/jeromeetienne/threex.planets@master/images/venusmap.jpg';
+// Real Mercury surface map (heavily cratered, warm tan) from the same repo —
+// far better than reusing the Moon photo with a tint.
+const MERCURY_TEX_URL = 'https://cdn.jsdelivr.net/gh/jeromeetienne/threex.planets@master/images/mercurymap.jpg';
+// Real 2K Mars surface map (Solar System Scope, via KyleGough/solar-system on
+// jsDelivr) — rusty terrain, dark albedo features, Valles Marineris, polar caps.
+const MARS_TEX_URL = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/mars.jpg';
+// Real 2K outer-planet maps (same source). Jupiter incl. the Great Red Spot;
+// Saturn globe (rings drawn separately); Uranus/Neptune ice-giant blues; Pluto
+// from N3rson/Solar-System-3D. All scrolled like Earth to read as turning globes.
+const JUPITER_TEX_URL = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/jupiter.jpg';
+const SATURN_TEX_URL  = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/saturn.jpg';
+const URANUS_TEX_URL  = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/uranus.jpg';
+const NEPTUNE_TEX_URL = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/neptune.jpg';
+// Real New Horizons enhanced-colour Pluto mosaic (Wikimedia, CORS-enabled) — the
+// actual photographed surface WITH Tombaugh Regio, the iconic heart. New Horizons
+// only imaged one hemisphere, so the south is black/unimaged; makePlutoTexture()
+// downsamples it and fills that void with Pluto-tan to make a clean globe.
+const PLUTO_TEX_URL   = 'https://upload.wikimedia.org/wikipedia/commons/a/ad/Pluto_color_mapmosaic.jpg';
+// Real Saturn ring texture — a 2048×125 radial strip (inner→outer): real band
+// colours, brightness, and transparent gaps (the Cassini division). Sampled into
+// a radial profile and drawn as fine concentric bands.
+const SATURN_RING_TEX_URL = 'https://cdn.jsdelivr.net/gh/KyleGough/solar-system@master/static/textures/saturn-ring.png';
+
+// ---- Famous-moon textures ----
+// Real Galilean-moon photo maps (N3rson/Solar-System-3D on jsDelivr — non-LFS,
+// CORS): Io's sulfur yellows, Europa's icy cracks, grey Ganymede & Callisto.
+const N3 = 'https://cdn.jsdelivr.net/gh/N3rson/Solar-System-3D@master/src/images/';
+const MOON_TEX_URLS = {
+  io:       N3 + 'jupiterIo.jpg',
+  europa:   N3 + 'jupiterEuropa.jpg',
+  ganymede: N3 + 'jupiterGanymede.jpg',
+  callisto: N3 + 'jupiterCallisto.jpg'
+};
+// Phobos, Deimos and Charon use their real NASA globe photos (their shape —
+// irregular potatoes for Phobos/Deimos, round for Charon — shows naturally
+// because the photo's black margins blend into the black sky), spun by rotating
+// the image. This is the original look; Charon keeps its reddish "Mordor" pole.
+const MOON_PHOTO = {
+  phobos: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Phobos_colour_2008.jpg/1280px-Phobos_colour_2008.jpg',
+  deimos: 'https://upload.wikimedia.org/wikipedia/commons/8/8d/Deimos-MRO.jpg',
+  charon: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Charon_in_Enhanced_Color.jpg/1280px-Charon_in_Enhanced_Color.jpg'
+};
+// Hazy/smooth moons with no usable cratered map: a plain shaded globe in the
+// right colour. Titan is a featureless orange haze ball in visible light (this
+// is accurate); Triton is pinkish-tan. [core, mid, limb] colours.
+const MOON_SMOOTH = {
+  titan:  ['#e8bc66', '#c88a3c', '#7c4f1e'],
+  triton: ['#dcc8b6', '#b89a86', '#6c5648']
+};
+
+// Real galaxy photos (Wikimedia, CORS), drawn additively over the black sky:
+//  • Milky Way → M101 (Pinwheel), a face-on barred spiral.
+//  • Andromeda → the real M31 (tilted disc, dust lanes, companions baked in).
+//  • Milkdromeda → the real M31 spiral (a vivid tilted Andromeda-style galaxy,
+//    matching the reference picture).
+const MILKYWAY_TEX_URL    = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/M101_hires_STScI-PRC2006-10a.jpg/1280px-M101_hires_STScI-PRC2006-10a.jpg';
+const ANDROMEDA_TEX_URL   = 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/98/Andromeda_Galaxy_%28with_h-alpha%29.jpg/1280px-Andromeda_Galaxy_%28with_h-alpha%29.jpg';
+const MILKDROMEDA_TEX_URL = ANDROMEDA_TEX_URL;
+// Laniakea + Universe: prefer the user's own local image (saved next to this
+// file as laniakea.png / universe.png — loaded without crossOrigin since it's
+// local and never read back). If that file isn't present, fall back to a web
+// image: the Universe fallback is the real WMAP CMB map (the classic coloured
+// Mollweide oval); Laniakea's is a full-colour Large Magellanic Cloud field as
+// a stand-in. Both are edge-feathered to black in realistic mode.
+const LANIAKEA_TEX_URL      = 'laniakea.png';
+const LANIAKEA_TEX_FALLBACK = 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/LMC_full_color_%28Large_Magellanic_Cloud%29.jpg/1280px-LMC_full_color_%28Large_Magellanic_Cloud%29.jpg';
+const UNIVERSE_TEX_URL      = 'universe.png';
+const UNIVERSE_TEX_FALLBACK = 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ed/WMAP_2012.png/1280px-WMAP_2012.png';
+
+// Real sidereal rotation periods, in hours. Negative = retrograde (Venus).
+// Mars is intentionally absent — keeps its random spin since the user didn't
+// specify it. Periods are mapped to a watchable on-screen speed by
+// SPIN_HOURS_PER_REAL_SEC: 24 sim-hours of rotation play out over 12 real
+// seconds, so Earth turns once every ~12 s and the relative ratios hold.
+const NAMED_SPIN_HOURS = {
+  'sun':     24,
+  'mercury': 58 * 24,     // 58 days
+  'venus':   -243 * 24,   // 243 days, retrograde
+  'earth':   24,
+  'jupiter': 10,
+  'saturn':  10,
+  'uranus':  17,
+  'neptune': 16,
+  'pluto':   153,
+  // Moons — real sidereal rotation periods (hours); Triton retrograde. Phobos,
+  // Deimos and Charon are absent → they keep the default free spin.
+  'io':       42.46,
+  'europa':   85.22,
+  'ganymede': 171.71,
+  'callisto': 400.54,
+  'titan':    382.68,
+  'triton':  -141.05
+};
+const SPIN_HOURS_PER_REAL_SEC = 24 / 12; // 24 sim-hours → 12 real seconds
+
+function namedSpinRate(nameLow) {
+  const h = NAMED_SPIN_HOURS[nameLow];
+  if (h === undefined) return undefined;
+  const periodSec = Math.abs(h) / SPIN_HOURS_PER_REAL_SEC;
+  return Math.sign(h) * (2 * Math.PI) / periodSec; // rad / real-second
+}
+
+// The body a moon orbits, for tidal-lock spin. Prefers the body whose name
+// matches the moon's rootPlanetName (e.g. Earth's "Moon"); otherwise falls
+// back to the nearest non-moon, non-asteroid, non-comet body.
+function findMoonParent(moon) {
+  if (moon.rootPlanetName) {
+    const want = moon.rootPlanetName.toLowerCase();
+    const byName = bodies.find(b => b !== moon && (b.name || '').toLowerCase() === want);
+    if (byName) return byName;
+  }
+  let best = null, bestD = Infinity;
+  for (const b of bodies) {
+    if (b === moon || b.isMoon || b.isAsteroid || b.isComet) continue;
+    const dx = b.x - moon.x, dy = b.y - moon.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = b; }
+  }
+  return best;
+}
+
+// Real Earth textures — the exact image set the "beyond" repo loads from the
+// three.js examples (served via jsDelivr GitHub CDN with CORS headers). The
+// repo applies them on a WebGL sphere with GLSL shaders; here we render them
+// onto the 2D Earth disc with a scrolled "globe" wrap + day/night terminator.
+const _earthTextures = { day: null, clouds: null };
+function loadEarthTextures() {
+  if (_earthTextures.day) return;
+  const base = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/';
+  const day = new Image(); day.crossOrigin = 'anonymous'; day.src = base + 'earth_atmos_2048.jpg';
+  const clouds = new Image(); clouds.crossOrigin = 'anonymous'; clouds.src = base + 'earth_clouds_1024.png';
+  _earthTextures.day = day;
+  _earthTextures.clouds = clouds;
+}
+function _texReady(img) { return img && img.complete && img.naturalWidth > 0; }
+
+// Procedural Venus map — the Magellan-style RADAR SURFACE view (rocky orange
+// terrain under the clouds), not the cloud deck. No real Venus photo ships on
+// the three.js CDN (only Earth + Moon), so build an equirectangular (2:1)
+// texture once onto an offscreen canvas and scroll it like the photo maps.
+// fBm value noise (reusing _makeValueNoise3D, sampled on a cylinder so it wraps
+// seamlessly in x) gives the rugged mottled surface; a low-frequency province
+// noise carves big bright highlands vs dark plains; two ridged-noise passes add
+// the tessera/ridge-belt filaments; a smoothstep boosts contrast so highlands
+// pop; a hue-variation noise tints regions redder/yellower; and a crater +
+// corona overlay stamps the circular features. Colour: dark reddish-brown →
+// burnt orange → amber → bright radar-reflective cream.
+let _venusTex = null;
+function makeVenusTexture() {
+  if (_venusTex) return _venusTex;
+  const W = 1024, H = 512;                 // 2:1 equirectangular (crisp detail)
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  const n1 = _makeValueNoise3D(31);        // base terrain
+  const n2 = _makeValueNoise3D(53);        // domain warp + ridges
+  const n3 = _makeValueNoise3D(71);        // large provinces + fine ridges
+  const n4 = _makeValueNoise3D(97);        // hue variation
+  const img = c.createImageData(W, H);
+  const data = img.data;
+  for (let y = 0; y < H; y++) {
+    const yN = y / H;
+    for (let x = 0; x < W; x++) {
+      const theta = (x / W) * Math.PI * 2; // cylinder angle ⇒ seamless wrap
+      const ct = Math.cos(theta), st = Math.sin(theta);
+      // Base fBm terrain (7 octaves for finer detail)
+      let v = 0, amp = 1, freq = 1, tot = 0;
+      for (let k = 0; k < 7; k++) {
+        const f = 3.0 * freq;
+        v += amp * n1(ct * f, st * f, yN * f * 2.8);
+        tot += amp; amp *= 0.55; freq *= 2;
+      }
+      let h = v / tot;
+      // Domain warp breaks up the mottling so it doesn't look like blobs
+      h += (n2(ct * 4, st * 4, yN * 9) - 0.5) * 0.45;
+      // Large-scale provinces: bright highlands vs dark plains
+      h = h * 0.68 + n3(ct * 1.1, st * 1.1, yN * 2.2) * 0.32;
+      // Ridged filament detail at two scales (tesserae / ridge belts)
+      const ridge1 = 1 - Math.abs(2 * n2(ct * 7  + 5, st * 7  + 5, yN * 16) - 1);
+      const ridge2 = 1 - Math.abs(2 * n3(ct * 13 + 9, st * 13 + 9, yN * 28) - 1);
+      h = h * 0.78 + ridge1 * 0.14 + ridge2 * 0.08;
+      if (h < 0) h = 0; else if (h > 1) h = 1;
+      h = h * h * (3 - 2 * h);              // smoothstep ⇒ contrast (highlands pop)
+      // Hue variation: shift regions redder (-) or yellower (+)
+      const hue = n4(ct * 1.6, st * 1.6, yN * 3.0) - 0.5;
+      // Colour ramp: dark reddish-brown → burnt orange → amber → bright cream
+      let R, G, B;
+      if (h < 0.28)      { const t = h / 0.28;          R = 88  + t*52; G = 42  + t*30; B = 16 + t*10; }
+      else if (h < 0.52) { const t = (h - 0.28) / 0.24; R = 140 + t*48; G = 72  + t*32; B = 26 + t*12; }
+      else if (h < 0.72) { const t = (h - 0.52) / 0.20; R = 188 + t*42; G = 104 + t*46; B = 38 + t*32; }
+      else if (h < 0.88) { const t = (h - 0.72) / 0.16; R = 230 + t*20; G = 150 + t*48; B = 70 + t*58; }
+      else               { const t = (h - 0.88) / 0.12; R = 250 + t*3;  G = 198 + t*42; B = 128 + t*55; }
+      R += hue * 14; G += hue * 6; B -= hue * 12;
+      const i = (y * W + x) * 4;
+      data[i]   = R < 0 ? 0 : R > 255 ? 255 : R;
+      data[i+1] = G < 0 ? 0 : G > 255 ? 255 : G;
+      data[i+2] = B < 0 ? 0 : B > 255 ? 255 : B;
+      data[i+3] = 255;
+    }
+  }
+  c.putImageData(img, 0, 0);
+  _venusAddCraters(c, W, H);               // stamp circular features on top
+  _venusTex = cv;
+  return cv;
+}
+
+// Stamp impact craters (dark floor + bright radar rim + ejecta) and volcanic
+// coronae (large bright ridge rings) onto the Venus map. Features near the x
+// edges are drawn again wrapped by ±W so they stay continuous across the seam.
+// Confined to |lat| < ~0.4 to avoid the worst equirectangular pole stretching.
+function _venusAddCraters(c, W, H) {
+  const draw = (cx, cy, rr, type) => {
+    const g = c.createRadialGradient(cx, cy, type === 'corona' ? rr * 0.2 : 0, cx, cy, rr);
+    if (type === 'corona') {
+      g.addColorStop(0.00, 'rgba(150,90,40,0)');
+      g.addColorStop(0.74, 'rgba(150,90,40,0)');
+      g.addColorStop(0.86, 'rgba(245,215,150,0.34)');   // bright ridge ring
+      g.addColorStop(1.00, 'rgba(120,70,30,0)');
+    } else {
+      g.addColorStop(0.00, 'rgba(70,38,16,0.55)');       // dark floor
+      g.addColorStop(0.58, 'rgba(92,52,22,0.30)');
+      g.addColorStop(0.78, 'rgba(250,222,150,0.50)');    // bright rim
+      g.addColorStop(0.90, 'rgba(245,215,150,0.16)');    // ejecta halo
+      g.addColorStop(1.00, 'rgba(120,70,30,0)');
+    }
+    c.fillStyle = g;
+    c.beginPath(); c.arc(cx, cy, rr, 0, Math.PI * 2); c.fill();
+  };
+  const place = (cx, cy, rr, type) => {
+    draw(cx, cy, rr, type);
+    if (cx - rr < 0) draw(cx + W, cy, rr, type);
+    if (cx + rr > W) draw(cx - W, cy, rr, type);
+  };
+  for (let i = 0; i < 12; i++) {           // volcanic coronae (large)
+    place(Math.random() * W, H * 0.18 + Math.random() * H * 0.64,
+          H * (0.05 + Math.random() * 0.07), 'corona');
+  }
+  for (let i = 0; i < 70; i++) {           // impact craters (small/medium)
+    place(Math.random() * W, H * 0.12 + Math.random() * H * 0.76,
+          H * (0.010 + Math.random() * 0.032), 'crater');
+  }
+}
+
+// Bodies whose realistic render scrolls an equirectangular texture to convey
+// rotation. drawBody skips the canvas spin transform for these (the scroll
+// handles spin) to avoid float jitter at high zoom.
+function usesScrolledTexture(b) {
+  if (!realisticMode) return false;
+  const n = (b.name || '').toLowerCase();
+  if (MOON_TEX_URLS[n] || MOON_PHOTO[n] || MOON_SMOOTH[n]) return true;  // famous moons
+  return n === 'earth' || n === 'moon' || n === 'mercury' || n === 'venus' || n === 'mars' ||
+         n === 'sun' || n === 'jupiter' || n === 'saturn' || n === 'uranus' ||
+         n === 'neptune' || n === 'pluto';
+}
+
+// Real axial tilts (obliquity, degrees). Venus/Uranus/Pluto are >90° because
+// they spin retrograde / on their sides. Used to lean each rendered globe's
+// spin axis. Earth's famous 23.4° lives here.
+const AXIAL_TILT = {
+  mercury: 0.03, venus: 177.4, earth: 23.44, mars: 25.19,
+  jupiter: 3.13, saturn: 26.73, uranus: 97.77, neptune: 28.32,
+  pluto: 119.6, sun: 7.25, moon: 6.68
+};
+function axialTiltRad(b) {
+  const deg = AXIAL_TILT[(b && b.name || '').toLowerCase()];
+  return deg ? deg * Math.PI / 180 : 0;
+}
+
+// Draw a square slice of an equirectangular texture into a disc box, scrolled
+// horizontally by `spin` (wrapping at the seam). dcx/dcy/dr are the disc
+// CENTER and radius in whatever coordinate space the ctx is currently in.
+// `tiltRad` (optional) rotates the globe about its centre to show the body's
+// AXIAL TILT (obliquity) — the spin axis, normally vertical, leans by this
+// angle (e.g. Earth 23.4°, Uranus on its side). The disc clip is a circle, so
+// rotating the texture square never leaves a gap.
+function drawScrolledGlobeAt(img, dcx, dcy, dr, spin, tiltRad) {
+  // naturalWidth/Height for <img>; width/height for an offscreen <canvas>
+  // (procedural maps like Venus). drawImage accepts either source type.
+  const tw = img.naturalWidth || img.width, th = img.naturalHeight || img.height;
+  const sliceW = th;                       // square slice ≈ one hemisphere
+  const sx = (((spin / (Math.PI * 2)) % 1 + 1) % 1) * tw;
+  const dx0 = dcx - dr, dy0 = dcy - dr, dw = dr * 2, dh = dr * 2;
+  ctx.save();
+  if (tiltRad) { ctx.translate(dcx, dcy); ctx.rotate(tiltRad); ctx.translate(-dcx, -dcy); }
+  // Two drawImage halves (fast — a pattern fill was much slower with ~20 textured
+  // bodies). At the wrap each half is extended ~1px past the split so they OVERLAP,
+  // hiding the anti-aliased "stitch line" the old abutting split left behind.
+  if (sx + sliceW <= tw) {
+    ctx.drawImage(img, sx, 0, sliceW, th, dx0, dy0, dw, dh);
+  } else {
+    const w1 = tw - sx, frac1 = w1 / sliceW, splitX = dx0 + dw * frac1, ov = 1;
+    ctx.drawImage(img, sx, 0, w1, th, dx0, dy0, dw * frac1 + ov, dh);
+    ctx.drawImage(img, 0, 0, sliceW - w1, th, splitX - ov, dy0, dw * (1 - frac1) + ov, dh);
+  }
+  ctx.restore();
+}
+// World-space convenience wrapper (kept for any caller using world coords).
+function drawScrolledGlobe(img, b, r, spin) { drawScrolledGlobeAt(img, b.x, b.y, r, spin); }
+
+// Screen-space position + scale of a body. Computing this in JS doubles and
+// then drawing in screen space avoids the float jitter you get pushing huge
+// AU-scale world coords through the canvas transform at high zoom (which made
+// textured bodies "shake").
+function bodyScreenPos(b) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (is3D) {
+    const p = project3DScreen(b.x, b.y, b.z || 0);
+    return { sx: p.sx, sy: p.sy, scale: p.scale };
+  }
+  return { sx: (b.x - viewX) * viewZoom + w / 2, sy: (b.y - viewY) * viewZoom + h / 2, scale: viewZoom };
+}
+
+// Screen-space limb shade (sphere read): bright top-left, dark bottom-right edge.
+function _limbShadeScreen(sx, sy, sr) {
+  const g = ctx.createRadialGradient(sx - sr * 0.4, sy - sr * 0.4, 0, sx, sy, sr);
+  g.addColorStop(0,   'rgba(255,255,255,0.22)');
+  g.addColorStop(0.7, 'rgba(255,255,255,0)');
+  g.addColorStop(1,   'rgba(0,0,0,0.5)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill();
+}
+
+// Screen-space day/night terminator. Softer than the old version so it reads
+// as a clean lit/dark hemisphere rather than a muddy band.
+function _applyDayNightScreen(b, sx, sy, sr) {
+  let sun = null, best = Infinity;
+  // Iterate the per-frame suns cache (just the stars) instead of rescanning the
+  // whole bodies array — which, with a big asteroid belt, was O(bodies) per
+  // textured body per frame and a major cause of realistic-mode lag.
+  const list = _frameSuns.length ? _frameSuns : bodies;
+  for (const s of list) {
+    if (!s.isSun) continue;
+    const dx = s.x - b.x, dy = s.y - b.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < best) { best = d2; sun = s; }
+  }
+  if (!sun) return;
+  const dx = sun.x - b.x, dy = sun.y - b.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const ng = ctx.createLinearGradient(sx + ux*sr, sy + uy*sr, sx - ux*sr, sy - uy*sr);
+  ng.addColorStop(0.00, 'rgba(0,0,0,0)');
+  ng.addColorStop(0.50, 'rgba(0,0,4,0.04)');
+  ng.addColorStop(0.70, 'rgba(0,0,4,0.45)');
+  ng.addColorStop(1.00, 'rgba(0,0,3,0.86)');
+  ctx.fillStyle = ng;
+  ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill();
+}
 
 function _seedFeatures(b, name) {
   if (b._realFeatName === name && b._realFeat) return b._realFeat;
@@ -960,19 +1451,22 @@ function _seedFeatures(b, name) {
   const f = {};
   if (name === 'mercury') {
     f.craters = [];
-    for (let i = 0; i < 24; i++) f.craters.push({
+    // Many small craters. sqrt(rng) on the radius gives a uniform areal
+    // density instead of clumping at the center.
+    for (let i = 0; i < 70; i++) f.craters.push({
       ang: rng() * Math.PI * 2,
-      dist: rng() * 0.88,
-      size: 0.04 + rng() * 0.10,
-      darkness: 0.18 + rng() * 0.28
+      dist: Math.sqrt(rng()) * 0.94,
+      size: 0.012 + rng() * 0.045,
+      depth: 0.25 + rng() * 0.45
     });
-  } else if (name === 'venus') {
-    f.swirls = [];
-    for (let i = 0; i < 7; i++) f.swirls.push({
-      yFrac: -0.7 + (i / 6) * 1.4,
-      phase: rng() * Math.PI * 2,
-      amp: 0.06 + rng() * 0.10,
-      thick: 0.08 + rng() * 0.10
+    // A few broad faint patches (maria-like) for large-scale tonal variation.
+    f.patches = [];
+    for (let i = 0; i < 8; i++) f.patches.push({
+      ang: rng() * Math.PI * 2,
+      dist: rng() * 0.7,
+      size: 0.25 + rng() * 0.30,
+      shade: rng() < 0.5 ? -1 : 1,
+      amt: 0.05 + rng() * 0.08
     });
   } else if (name === 'mars') {
     f.patches = [];
@@ -1061,97 +1555,207 @@ function _limbShade(b, r) {
 }
 
 function drawRealisticMercury(b, r) {
-  const f = _seedFeatures(b, 'mercury');
+  const tex = loadTex(MERCURY_TEX_URL);
+  const spin = b.spin || 0;
+  if (_texReady(tex)) {
+    // Screen-space draw (avoids high-zoom jitter) of the real cratered Mercury
+    // surface map — no tint needed, the photo is already the right colour.
+    const p = bodyScreenPos(b);
+    const sr = r * p.scale;
+    if (sr < 0.4) return;
+    ctx.save();
+    ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+    drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
+    _applyDayNightScreen(b, p.sx, p.sy, sr);
+    _limbShadeScreen(p.sx, p.sy, sr);
+    ctx.restore();
+    return;
+  }
+  // ---- Procedural fallback (texture not loaded / offline) ----
   ctx.save();
   _clipDisc(b, r);
+  const f = _seedFeatures(b, 'mercury');
   const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
-  g.addColorStop(0, '#cdb594'); g.addColorStop(0.5, '#9a8870'); g.addColorStop(1, '#5b4d3a');
+  g.addColorStop(0, '#b8a88c'); g.addColorStop(0.5, '#8f8068'); g.addColorStop(1, '#564b3a');
   ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  for (const p of f.patches) {
+    const px = b.x + Math.cos(p.ang) * r * p.dist;
+    const py = b.y + Math.sin(p.ang) * r * p.dist;
+    const pr = r * p.size;
+    const pg = ctx.createRadialGradient(px, py, 0, px, py, pr);
+    const tone = p.shade > 0 ? '170,155,128' : '90,78,60';
+    pg.addColorStop(0, `rgba(${tone},${p.amt})`);
+    pg.addColorStop(1, `rgba(${tone},0)`);
+    ctx.fillStyle = pg;
+    ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI*2); ctx.fill();
+  }
   for (const c of f.craters) {
     const cx = b.x + Math.cos(c.ang) * r * c.dist;
     const cy = b.y + Math.sin(c.ang) * r * c.dist;
     const cr = r * c.size;
-    ctx.fillStyle = `rgba(40,30,20,${c.darkness})`;
-    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = 'rgba(220,200,170,0.25)';
-    ctx.beginPath(); ctx.arc(cx - cr * 0.25, cy - cr * 0.3, cr * 0.55, 0, Math.PI*2); ctx.fill();
+    if (cr < 0.4) continue;
+    const bowl = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    bowl.addColorStop(0,   `rgba(45,38,27,${c.depth})`);
+    bowl.addColorStop(0.7, `rgba(58,49,37,${c.depth * 0.45})`);
+    bowl.addColorStop(1,   'rgba(58,49,37,0)');
+    ctx.fillStyle = bowl;
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = Math.max(0.5, cr * 0.16);
+    ctx.strokeStyle = `rgba(215,200,170,${c.depth * 0.55})`;
+    ctx.beginPath(); ctx.arc(cx, cy, cr * 0.9, Math.PI * 0.95, Math.PI * 1.75); ctx.stroke();
+    ctx.strokeStyle = `rgba(18,13,7,${c.depth * 0.5})`;
+    ctx.beginPath(); ctx.arc(cx, cy, cr * 0.9, Math.PI * -0.05, Math.PI * 0.75); ctx.stroke();
   }
   ctx.restore();
   _limbShade(b, r);
 }
 
+// Realistic Venus — real Magellan radar SURFACE photo map (VENUS_TEX_URL) when
+// loaded, else the procedural makeVenusTexture() fallback (offline / still
+// loading). Scrolled by spin and rendered in SCREEN space (like Earth/Moon/
+// Mercury) to avoid high-zoom float jitter. No atmosphere halo — matches the
+// bare radar-surface look, with limb darkening for the sphere read and a
+// day/night terminator for in-scene lighting.
 function drawRealisticVenus(b, r) {
-  const f = _seedFeatures(b, 'venus');
+  const photo = loadTex(VENUS_TEX_URL);
+  const tex = _texReady(photo) ? photo : makeVenusTexture();
+  const spin = b.spin || 0;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
   ctx.save();
-  _clipDisc(b, r);
-  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
-  g.addColorStop(0, '#ffdc8a'); g.addColorStop(0.55, '#e09a48'); g.addColorStop(1, '#7a3a10');
-  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
-  // Cloud bands as sinuous horizontal strokes
-  for (const s of f.swirls) {
-    ctx.strokeStyle = `rgba(255, 220, 160, 0.40)`;
-    ctx.lineWidth = r * s.thick;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    const yC = b.y + r * s.yFrac;
-    const xL = b.x - r;
-    const xR = b.x + r;
-    for (let x = xL; x <= xR; x += r * 0.05) {
-      const yy = yC + Math.sin((x - b.x) / r * Math.PI * (s.amp * 14 + 2) + s.phase) * r * s.amp;
-      if (x === xL) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
-  }
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
+  _applyDayNightScreen(b, p.sx, p.sy, sr);
+  _limbShadeScreen(p.sx, p.sy, sr);
   ctx.restore();
-  _limbShade(b, r);
 }
 
+// Shared day/night terminator — darken the hemisphere of `b` that faces away
+// from the nearest sun. Expects the disc clip to already be active.
+function _applyDayNight(b, r, darkness) {
+  let sun = null, best = Infinity;
+  for (const s of bodies) {
+    if (!s.isSun) continue;
+    const dxs = s.x - b.x, dys = s.y - b.y;
+    const d2 = dxs*dxs + dys*dys;
+    if (d2 < best) { best = d2; sun = s; }
+  }
+  if (!sun) return;
+  const dxs = sun.x - b.x, dys = sun.y - b.y;
+  const len = Math.hypot(dxs, dys) || 1;
+  const ux = dxs / len, uy = dys / len;
+  const dk = darkness != null ? darkness : 0.92;
+  const ng = ctx.createLinearGradient(b.x + ux*r, b.y + uy*r, b.x - ux*r, b.y - uy*r);
+  ng.addColorStop(0.00, 'rgba(0,0,0,0)');
+  ng.addColorStop(0.45, `rgba(0,0,6,${dk * 0.05})`);
+  ng.addColorStop(0.62, `rgba(0,0,8,${dk * 0.6})`);
+  ng.addColorStop(0.80, `rgba(0,0,8,${dk * 0.93})`);
+  ng.addColorStop(1.00, `rgba(0,0,5,${dk})`);
+  ctx.fillStyle = ng;
+  ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+}
+
+// Realistic Moon — real three.js moon photo map, scrolled by spin, with a
+// day/night terminator. No atmosphere (airless body).
+function drawRealisticMoon(b, r) {
+  const tex = loadTex(MOON_TEX_URL);
+  const spin = b.spin || 0;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  // Draw in SCREEN space (reset transform) to avoid high-zoom float jitter.
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  if (_texReady(tex)) {
+    drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
+  } else {
+    const g = ctx.createRadialGradient(p.sx - sr*0.3, p.sy - sr*0.3, 0, p.sx, p.sy, sr);
+    g.addColorStop(0, '#cfcabf'); g.addColorStop(0.6, '#9a958c'); g.addColorStop(1, '#4a463f');
+    ctx.fillStyle = g; ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  }
+  _applyDayNightScreen(b, p.sx, p.sy, sr);
+  _limbShadeScreen(p.sx, p.sy, sr);
+  ctx.restore();
+}
+
+// Realistic Earth — uses the real three.js NASA day map + cloud PNG (the
+// same textures the "beyond" repo loads). Adapted from that repo's WebGL
+// sphere/shader approach to the 2D disc: the equirectangular map is scrolled
+// horizontally by the body's spin to read as a turning globe, with a
+// day/night terminator from the nearest sun and an atmosphere rim.
 function drawRealisticEarth(b, r) {
+  loadEarthTextures();
+  const day = _earthTextures.day, clouds = _earthTextures.clouds;
+  const spin = b.spin || 0;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+
+  // SCREEN-space draw — avoids high-zoom float jitter ("shaking").
   ctx.save();
-  _clipDisc(b, r);
-  // Ocean
-  const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
-  g.addColorStop(0, '#5fa8e8'); g.addColorStop(0.55, '#1f4f9a'); g.addColorStop(1, '#0a2454');
-  ctx.fillStyle = g; ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
-  // Continents — reuse the procedural continents (applyEarthFeatures) if any,
-  // otherwise generate green blobs deterministically.
-  if (!b.continents) {
-    b.continents = [];
-    for (let i = 0; i < 5; i++) {
-      b.continents.push({
-        angle: Math.random() * Math.PI * 2,
-        distFrac: Math.random() * 0.55,
-        sizeFrac: 0.20 + Math.random() * 0.16,
-        shade: Math.random()
-      });
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  if (_texReady(day)) {
+    drawScrolledGlobeAt(day, p.sx, p.sy, sr, spin, axialTiltRad(b));
+    if (_texReady(clouds)) {
+      ctx.globalAlpha = 0.9;
+      drawScrolledGlobeAt(clouds, p.sx, p.sy, sr, spin * 1.18, axialTiltRad(b));
+      ctx.globalAlpha = 1;
     }
+  } else {
+    const g = ctx.createRadialGradient(p.sx - sr*0.3, p.sy - sr*0.3, 0, p.sx, p.sy, sr);
+    g.addColorStop(0, '#5fa8e8'); g.addColorStop(0.55, '#1f4f9a'); g.addColorStop(1, '#0a2454');
+    ctx.fillStyle = g; ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
   }
-  for (const c of b.continents) {
-    const cx = b.x + Math.cos(c.angle) * c.distFrac * r;
-    const cy = b.y + Math.sin(c.angle) * c.distFrac * r;
-    const cr = c.sizeFrac * r;
-    const gShade = Math.round(120 + c.shade * 80);
-    ctx.fillStyle = `rgb(40, ${gShade}, 50)`;
-    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
-    // Brown coastline
-    ctx.strokeStyle = 'rgba(120,90,55,0.5)';
-    ctx.lineWidth = r * 0.02;
-    ctx.stroke();
-  }
-  // Cloud wisps
-  ctx.fillStyle = 'rgba(255,255,255,0.45)';
-  for (let i = 0; i < 4; i++) {
-    const cx = b.x + Math.cos(i * 1.7 + 0.4) * r * 0.6;
-    const cy = b.y + Math.sin(i * 1.3 + 0.9) * r * 0.55;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, r * 0.25, r * 0.08, i * 0.7, 0, Math.PI*2);
-    ctx.fill();
-  }
+  _applyDayNightScreen(b, p.sx, p.sy, sr);
   ctx.restore();
-  _limbShade(b, r);
+
+  // Atmosphere rim (additive, screen space). Brightest at the limb — the
+  // horizon scattering band — then progressively DARKER toward space: the
+  // colour deepens light-cyan → blue → navy and the alpha falls off, so the
+  // outer atmosphere reads as a dark blue haze fading into black, like the
+  // real limb seen from orbit (rather than a uniform light-blue glow).
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  const ar = ctx.createRadialGradient(p.sx, p.sy, sr * 0.86, p.sx, p.sy, sr * 1.14);
+  ar.addColorStop(0.00, 'rgba(110,175,255,0)');    // over disc — transparent
+  ar.addColorStop(0.40, 'rgba(120,185,255,0.10)'); // faint blue rising to the edge
+  ar.addColorStop(0.50, 'rgba(165,210,255,0.46)'); // brightest band at the limb
+  ar.addColorStop(0.62, 'rgba(95,150,235,0.30)');  // deeper, dimmer blue
+  ar.addColorStop(0.76, 'rgba(45,90,180,0.17)');   // navy — darkening into space
+  ar.addColorStop(0.90, 'rgba(18,40,100,0.07)');   // very dark blue, nearly gone
+  ar.addColorStop(1.00, 'rgba(8,18,55,0)');        // space black
+  ctx.fillStyle = ar;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.14, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
 }
 
+// Realistic Mars — real 2K surface photo map (MARS_TEX_URL) when loaded, else
+// the procedural fallback below. Screen-space scrolled render (no high-zoom
+// shake) with a day/night terminator and limb darkening. Mars's atmosphere is
+// too thin to show a rim glow, so none is drawn.
 function drawRealisticMars(b, r) {
+  const tex = loadTex(MARS_TEX_URL);
+  if (_texReady(tex)) {
+    const spin = b.spin || 0;
+    const p = bodyScreenPos(b);
+    const sr = r * p.scale;
+    if (sr < 0.4) return;
+    ctx.save();
+    ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+    drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
+    _applyDayNightScreen(b, p.sx, p.sy, sr);
+    _limbShadeScreen(p.sx, p.sy, sr);
+    ctx.restore();
+    return;
+  }
+  // ---- Procedural fallback (texture not loaded / offline) ----
   const f = _seedFeatures(b, 'mars');
   ctx.save();
   _clipDisc(b, r);
@@ -1175,7 +1779,79 @@ function drawRealisticMars(b, r) {
   _limbShade(b, r);
 }
 
+// Draw a ready texture (image or offscreen canvas) as a body's surface: scrolled
+// by spin (a turning globe, like Earth) and rendered in SCREEN space — computing
+// the position in JS doubles and drawing with small numbers avoids the float
+// jitter ("shaking") that pushing huge AU-scale coords through the canvas zoom
+// causes at high zoom. Adds a day/night terminator and limb darkening.
+function _drawScrolledTexBody(b, r, tex) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(tex, p.sx, p.sy, sr, b.spin || 0, axialTiltRad(b));
+  _applyDayNightScreen(b, p.sx, p.sy, sr);
+  _limbShadeScreen(p.sx, p.sy, sr);
+  ctx.restore();
+}
+
+// Resolve a real photo map by URL and draw it (screen space, no shake). Returns
+// true if the texture was ready and drawn; false lets the caller fall back to
+// its procedural render while the image loads / when offline.
+function drawScrolledRealBody(b, r, texUrl) {
+  const tex = loadTex(texUrl);
+  if (!_texReady(tex)) return false;
+  _drawScrolledTexBody(b, r, tex);
+  return true;
+}
+
+// Draw a real NASA globe photo (moon centred on black) filling the disc, spun by
+// rotating the image. The irregular silhouette shows for free because the photo's
+// black margins blend into the black sky. Used for Phobos & Deimos (potatoes).
+function drawPhotoMoon(b, r, url) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  const img = loadTex(url);
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.3, 0, Math.PI * 2); ctx.clip();
+  if (_texReady(img)) {
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const s = (2 * sr) / (0.9 * Math.min(iw, ih));
+    const dw = iw * s, dh = ih * s;
+    ctx.translate(p.sx, p.sy);
+    ctx.rotate(b.spin || 0);
+    ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+  } else {
+    ctx.fillStyle = b.color || '#888';
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  }
+  ctx.restore();
+}
+
+// A smooth shaded globe in a given [core, mid, limb] palette — for hazy/smooth
+// moons with no cratered map (Titan's orange haze, Triton's pinkish ice).
+function drawSmoothMoon(b, r, cols) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  const g = ctx.createRadialGradient(p.sx - sr * 0.3, p.sy - sr * 0.3, 0, p.sx, p.sy, sr);
+  g.addColorStop(0, cols[0]); g.addColorStop(0.6, cols[1]); g.addColorStop(1, cols[2]);
+  ctx.fillStyle = g;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  _applyDayNightScreen(b, p.sx, p.sy, sr);
+  _limbShadeScreen(p.sx, p.sy, sr);
+  ctx.restore();
+}
+
 function drawRealisticJupiter(b, r) {
+  if (drawScrolledRealBody(b, r, JUPITER_TEX_URL)) return;
   const f = _seedFeatures(b, 'jupiter');
   ctx.save();
   _clipDisc(b, r);
@@ -1200,6 +1876,7 @@ function drawRealisticJupiter(b, r) {
 }
 
 function drawRealisticSaturn(b, r) {
+  if (drawScrolledRealBody(b, r, SATURN_TEX_URL)) return;
   const f = _seedFeatures(b, 'saturn');
   ctx.save();
   _clipDisc(b, r);
@@ -1217,6 +1894,7 @@ function drawRealisticSaturn(b, r) {
 }
 
 function drawRealisticUranus(b, r) {
+  if (drawScrolledRealBody(b, r, URANUS_TEX_URL)) return;
   const f = _seedFeatures(b, 'uranus');
   ctx.save();
   _clipDisc(b, r);
@@ -1234,6 +1912,7 @@ function drawRealisticUranus(b, r) {
 }
 
 function drawRealisticNeptune(b, r) {
+  if (drawScrolledRealBody(b, r, NEPTUNE_TEX_URL)) return;
   const f = _seedFeatures(b, 'neptune');
   ctx.save();
   _clipDisc(b, r);
@@ -1258,7 +1937,78 @@ function drawRealisticNeptune(b, r) {
   _limbShade(b, r);
 }
 
+// Build a clean equirectangular Pluto globe from the New Horizons mosaic (drawn
+// down to 2048×1024). New Horizons never photographed Pluto's deep south — it
+// was in polar-winter darkness, so NO angle of Pluto shows it and every "full"
+// map extrapolates it. Rather than invent flat colour, we EXTEND THE REAL
+// IMAGED TERRAIN into the void: for each column, find the bottom edge of the
+// photographed data and mirror the actual terrain up across that edge (with a
+// little grain + a longitudinal jitter to break the mirror symmetry). So the
+// south is built from real Pluto pixels. Cached; null until the photo loads.
+let _plutoTex = null;
+function makePlutoTexture() {
+  if (_plutoTex) return _plutoTex;
+  const src = loadTex(PLUTO_TEX_URL);
+  if (!_texReady(src)) return null;
+  const W = 2048, H = 1024;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  c.drawImage(src, 0, 0, W, H);
+  try {
+    const img = c.getImageData(0, 0, W, H);
+    const d = img.data;
+    const isVoid = (i) => d[i] + d[i + 1] + d[i + 2] < 45;
+    const ybArr = new Int32Array(W);
+    // 1) Reflect the real imaged terrain down into the void. The jitter + grain
+    //    ramp IN with depth (≈0 right at the edge), so the fill begins as a
+    //    seamless continuation of the photographed terrain rather than an abrupt
+    //    noisy band — that abrupt onset was the visible stitch line.
+    for (let x = 0; x < W; x++) {
+      let yb = -1;                                   // bottom edge of imaged data
+      for (let y = H - 1; y >= 0; y--) { if (!isVoid((y * W + x) * 4)) { yb = y; break; } }
+      ybArr[x] = yb;
+      if (yb < 1) continue;
+      for (let y = yb + 1; y < H; y++) {
+        const ramp = Math.min(1, (y - yb) / 60);      // 0 at edge → 1 by ~60px down
+        let sy = 2 * yb - y;                          // reflect across the edge
+        if (sy < 0) sy = Math.min(yb, -sy);           // re-reflect if it overshoots
+        const jit = Math.round((((Math.random() * 7) | 0) - 3) * ramp);
+        const sx = (x + jit + W) % W;                 // lon jitter (grows with depth)
+        const si = (sy * W + sx) * 4, di = (y * W + x) * 4;
+        const g = (Math.random() - 0.5) * 12 * ramp;  // grain (grows with depth)
+        d[di]     = d[si]     + g;
+        d[di + 1] = d[si + 1] + g;
+        d[di + 2] = d[si + 2] + g;
+      }
+    }
+    // 2) Dissolve the mirror crease: a short vertical blur straddling each
+    //    column's edge smooths the real→fill transition into a seamless gradient.
+    const src = new Uint8ClampedArray(d);
+    const R = 5;
+    for (let x = 0; x < W; x++) {
+      const yb = ybArr[x];
+      if (yb < 1) continue;
+      const y0 = Math.max(R, yb - 8), y1 = Math.min(H - 1 - R, yb + 48);
+      for (let y = y0; y <= y1; y++) {
+        let r = 0, gg = 0, b = 0;
+        for (let k = -R; k <= R; k++) {
+          const j = ((y + k) * W + x) * 4;
+          r += src[j]; gg += src[j + 1]; b += src[j + 2];
+        }
+        const n = R * 2 + 1, di = (y * W + x) * 4;
+        d[di] = r / n; d[di + 1] = gg / n; d[di + 2] = b / n;
+      }
+    }
+    c.putImageData(img, 0, 0);
+  } catch (e) { /* tainted (shouldn't happen — Wikimedia sends CORS) — use as-is */ }
+  _plutoTex = cv;
+  return cv;
+}
+
 function drawRealisticPluto(b, r) {
+  const tex = makePlutoTexture();
+  if (tex) { _drawScrolledTexBody(b, r, tex); return; }
   ctx.save();
   _clipDisc(b, r);
   const g = ctx.createRadialGradient(b.x - r*0.3, b.y - r*0.3, 0, b.x, b.y, r);
@@ -1368,29 +2118,37 @@ function getSunTextureCanvas() {
 }
 
 function drawRealisticSun(b, t) {
-  // Procedural plasma sun: drawImage the cached fBm texture, clipped to the
-  // disc, then add limb darkening for a sphere read and an outer halo.
+  // Procedural plasma sun. Rotates like Earth: the cylinder-sampled fBm texture
+  // is SCROLLED horizontally by spin (a turning globe) instead of being rigidly
+  // spun as a disc. Rendered in screen space (like the planets) so it also stays
+  // steady at high zoom. Then limb darkening for a sphere read and an outer halo.
   const r = b.radius;
-  ctx.save();
-  _clipDisc(b, r);
+  const spin = b.spin || 0;
   const tex = getSunTextureCanvas();
-  ctx.drawImage(tex, b.x - r, b.y - r, r * 2, r * 2);
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
   // Limb darkening — soft black gradient at the rim so the disc reads spherical.
-  const dg = ctx.createRadialGradient(b.x, b.y, r * 0.55, b.x, b.y, r);
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.55, p.sx, p.sy, sr);
   dg.addColorStop(0, 'rgba(0,0,0,0)');
   dg.addColorStop(1, 'rgba(0,0,0,0.45)');
   ctx.fillStyle = dg;
-  ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
   ctx.restore();
   // Bright limb glow outside the disc — the hot edge from the reference photo.
-  const lg = ctx.createRadialGradient(b.x, b.y, r * 0.97, b.x, b.y, r * 1.22);
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  const lg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.97, p.sx, p.sy, sr * 1.22);
   lg.addColorStop(0, 'rgba(255, 180, 70, 0.55)');
   lg.addColorStop(1, 'rgba(255, 100, 20, 0)');
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
   ctx.fillStyle = lg;
   ctx.beginPath();
-  ctx.arc(b.x, b.y, r * 1.22, 0, Math.PI * 2);
+  ctx.arc(p.sx, p.sy, sr * 1.22, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -1454,6 +2212,16 @@ function drawRealisticSun_OLD(b, t) {
 function drawRealisticBody(b, t) {
   if (!realisticMode) return false;
   const name = (b.name || '').toLowerCase();
+  // Famous moons (not in REALISTIC_NAMES): real Galilean photos, or the real
+  // Moon photo tinted for cratered rock/ice moons, or a smooth shaded globe.
+  if (b.isMoon) {
+    if (MOON_TEX_URLS[name]) {
+      if (!drawScrolledRealBody(b, b.radius, MOON_TEX_URLS[name])) drawSmoothMoon(b, b.radius, ['#9a9a9a', '#777', '#444']);
+      return true;
+    }
+    if (MOON_PHOTO[name])  { drawPhotoMoon(b, b.radius, MOON_PHOTO[name]); return true; }
+    if (MOON_SMOOTH[name]) { drawSmoothMoon(b, b.radius, MOON_SMOOTH[name]); return true; }
+  }
   if (!REALISTIC_NAMES.has(name)) return false;
   const r = b.radius;
   if (name === 'sun') {
@@ -1472,6 +2240,7 @@ function drawRealisticBody(b, t) {
     case 'uranus':  drawRealisticUranus(b, r);  break;
     case 'neptune': drawRealisticNeptune(b, r); break;
     case 'pluto':   drawRealisticPluto(b, r);   break;
+    case 'moon':    drawRealisticMoon(b, r);    break;
   }
   if (name === 'saturn') drawSaturnRings(b, false, 1);
   return true;
@@ -1485,15 +2254,15 @@ function toggleRealisticMode() {
 
 // The Great Red Spot — a fixed-position oval of stormy reds clipped to the
 // planet's disc, on the lower-right hemisphere in our top-down view.
-function drawJupiterSpot(b) {
+function drawJupiterSpot(b, cx = b.x, cy = b.y) {
   ctx.save();
   ctx.beginPath();
-  ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+  ctx.arc(cx, cy, b.radius, 0, Math.PI * 2);
   ctx.clip();
   const angle = Math.PI / 5;          // ~36° below the +x axis
   const dist  = b.radius * 0.4;
-  const sx = b.x + Math.cos(angle) * dist;
-  const sy = b.y + Math.sin(angle) * dist;
+  const sx = cx + Math.cos(angle) * dist;
+  const sy = cy + Math.sin(angle) * dist;
   const rx = b.radius * 0.34;
   const ry = b.radius * 0.20;
   const g = ctx.createRadialGradient(sx - rx * 0.25, sy - ry * 0.25, 0, sx, sy, rx);
@@ -1578,6 +2347,9 @@ function getUniverseImage() {
 // Laniakea supercluster: orange/gold filament web with bright cluster nodes.
 // Drawn procedurally because the structure is simpler than the CMB.
 function drawLaniakea(g) {
+  // Realistic mode: real Laniakea supercluster map, edges feathered to black.
+  // Falls through to the procedural web until the photo loads.
+  if (realisticMode && drawGalaxyPhoto(g, LANIAKEA_TEX_URL, 1.0, false, LANIAKEA_TEX_FALLBACK)) return;
   const cx = g.x, cy = g.y, r = g.radius;
   // Seeded jitter so the structure is stable per spawn
   const seed = g._seed || (g._seed = Math.random() * 1000);
@@ -1800,6 +2572,9 @@ function drawLaniakea(g) {
 }
 
 function drawUniverse(g) {
+  // Realistic mode: real cosmic-web simulation frame, edges feathered to black.
+  // Falls through to the procedural CMB blob until the photo loads.
+  if (realisticMode && drawGalaxyPhoto(g, UNIVERSE_TEX_URL, 1.0, false, UNIVERSE_TEX_FALLBACK)) return;
   const cx = g.x, cy = g.y, r = g.radius;
   const img = getUniverseImage();
   const d = r * 2;
@@ -1816,6 +2591,84 @@ function drawUniverse(g) {
   ctx.restore();
 }
 
+// Build (once, cached) a copy of a galaxy photo whose edges are feathered to
+// transparent with an elliptical vignette, so the rectangular frame + its
+// background stars dissolve smoothly into the black sky instead of showing a
+// hard edge. `destination-in` keeps the image only where the gradient is opaque.
+const _galaxyFeather = {};
+function featheredGalaxy(img, url, boost) {
+  const key = boost ? url + '#b' : url;
+  if (_galaxyFeather[key]) return _galaxyFeather[key];
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const cv = document.createElement('canvas');
+  cv.width = iw; cv.height = ih;
+  const c = cv.getContext('2d');
+  c.drawImage(img, 0, 0);
+  c.globalCompositeOperation = 'destination-in';
+  c.save();
+  c.translate(iw / 2, ih / 2);
+  c.scale(iw / 2, ih / 2);                 // unit circle → ellipse inscribed in frame
+  const grad = c.createRadialGradient(0, 0, 0.55, 0, 0, 1.0);
+  grad.addColorStop(0, 'rgba(0,0,0,1)');   // keep centre
+  grad.addColorStop(1, 'rgba(0,0,0,0)');   // fade edge → transparent
+  c.fillStyle = grad;
+  c.fillRect(-1, -1, 2, 2);
+  c.restore();
+  c.globalCompositeOperation = 'source-over';
+  if (boost) {
+    // Punch up saturation + contrast and push toward blue (Milkdromeda), to
+    // match the vivid wallpaper look. Done once, per-pixel, then cached.
+    try {
+      const im = c.getImageData(0, 0, iw, ih), d = im.data;
+      const SAT = 1.75, CON = 1.14, BLUE = 1.16;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] < 6) continue;
+        let r = d[i], g = d[i + 1], b = d[i + 2];
+        const L = 0.299 * r + 0.587 * g + 0.114 * b;
+        r = L + (r - L) * SAT; g = L + (g - L) * SAT; b = (L + (b - L) * SAT) * BLUE;
+        r = (r - 128) * CON + 128; g = (g - 128) * CON + 128; b = (b - 128) * CON + 128;
+        d[i] = r < 0 ? 0 : r > 255 ? 255 : r;
+        d[i + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
+        d[i + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+      }
+      c.putImageData(im, 0, 0);
+    } catch (e) { /* tainted (shouldn't happen — Wikimedia CORS) */ }
+  }
+  _galaxyFeather[key] = cv;
+  return cv;
+}
+
+// Realistic galaxy: draw a real galaxy photo additively (its black sky adds
+// nothing, the galaxy glows), centred and scaled so its long axis ≈ the galaxy's
+// diameter, rotated by its rotation, with `tilt` squish (the photo's own
+// inclination carries most of it). The photo is edge-feathered so it dissolves
+// smoothly into darkness. Returns false (→ procedural fallback) until it loads.
+function drawGalaxyPhoto(g, url, tilt, boost, fallbackUrl) {
+  let img = loadTex(url);
+  let useUrl = url;
+  if (!_texReady(img)) {
+    // Primary not ready. If it actually FAILED (e.g. local file absent → load
+    // completes with 0×0), switch to the web fallback; otherwise it's still
+    // loading, so wait (draw procedural this frame).
+    if (fallbackUrl && img.complete && img.naturalWidth === 0) {
+      img = loadTex(fallbackUrl);
+      useUrl = fallbackUrl;
+    }
+    if (!_texReady(img)) return false;
+  }
+  const tex = featheredGalaxy(img, useUrl, boost);
+  const iw = tex.width, ih = tex.height;
+  const s = (2 * g.radius) / (0.9 * Math.max(iw, ih));
+  ctx.save();
+  ctx.translate(g.x, g.y);
+  ctx.rotate(g.rotation || 0);
+  ctx.scale(1, tilt);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(tex, -iw * s / 2, -ih * s / 2, iw * s, ih * s);
+  ctx.restore();
+  return true;
+}
+
 function drawGalaxy(g) {
   if (g.type === 'universe') { drawUniverse(g); return; }
   if (g.type === 'laniakea') { drawLaniakea(g); return; }
@@ -1823,6 +2676,14 @@ function drawGalaxy(g) {
   if (g.centerBodyId) {
     const c = bodies.find(b => b.id === g.centerBodyId);
     if (c) { g.x = c.x; g.y = c.y; }
+  }
+  // Real photos (additive) — ONLY in realistic mode; otherwise fall through to
+  // the procedural spiral. Tilt: Milky Way slightly squished; Andromeda &
+  // Milkdromeda near-1 since the photo's own shape carries the look.
+  if (realisticMode) {
+    if (g.type === 'milkyway'    && drawGalaxyPhoto(g, MILKYWAY_TEX_URL,    0.92)) return;
+    if (g.type === 'andromeda'   && drawGalaxyPhoto(g, ANDROMEDA_TEX_URL,   1.0))  return;
+    if (g.type === 'milkdromeda' && drawGalaxyPhoto(g, MILKDROMEDA_TEX_URL, 1.0, true)) return;
   }
   const cx = g.x, cy = g.y, r = g.radius;
   const isAndromeda   = g.type === 'andromeda';
@@ -2043,27 +2904,82 @@ function checkGalaxyMerges() {
 // behind the planet body (above the equator line in canvas), `false` draws
 // the half in front (below it). `scale` multiplies the ring radii — 1 for
 // Saturn, 200 for J1407b.
+// Sample the real ring strip (inner→outer) into a cached radial profile of
+// {r,g,b,a}. Null until the PNG loads. CORS-clean (jsDelivr) so getImageData
+// works without tainting.
+let _saturnRingProfile = null;
+function getSaturnRingProfile() {
+  if (_saturnRingProfile) return _saturnRingProfile;
+  const img = loadTex(SATURN_RING_TEX_URL);
+  if (!_texReady(img)) return null;
+  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = 1;
+  const c = cv.getContext('2d');
+  c.drawImage(img, 0, (H >> 1), W, 1, 0, 0, W, 1);   // one middle row = radial profile
+  let data;
+  try { data = c.getImageData(0, 0, W, 1).data; } catch (e) { return null; }
+  const N = 140;
+  const prof = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const j = Math.min(W - 1, Math.round((i / (N - 1)) * (W - 1))) * 4;
+    prof[i] = { r: data[j], g: data[j + 1], b: data[j + 2], a: data[j + 3] };
+  }
+  _saturnRingProfile = prof;
+  return prof;
+}
+
 function drawSaturnRings(b, backHalf, scale) {
-  const innerR = b.radius * 1.6 * scale;
-  const outerR = b.radius * 2.8 * scale;
-  const tilt = 0.28;
+  // Screen-space (like the textured Saturn globe) so the rings stay glued to the
+  // planet and don't jitter at high zoom. b.radius is already exaggerated by
+  // drawBody; bodyScreenPos gives the projected centre + scale.
+  const p = bodyScreenPos(b);
+  const sr = b.radius * p.scale;
+  if (sr < 0.5) return;
+  const innerR = sr * 1.24 * scale;        // ≈ real C-ring inner edge (1.24 Rs)
+  const outerR = sr * 2.27 * scale;        // ≈ real A-ring outer edge (2.27 Rs)
+  const span = outerR - innerR;
+  const tilt = 0.30;                        // viewing foreshorten (vertical squish)
+  const a0 = backHalf ? Math.PI : 0, a1 = backHalf ? 2 * Math.PI : Math.PI;
   ctx.save();
-  const rings = [
-    { frac: 0.10, alpha: 0.85, color: '230,210,180' },
-    { frac: 0.35, alpha: 0.45, color: '180,160,130' },
-    { frac: 0.55, alpha: 0.90, color: '240,220,190' },
-    { frac: 0.80, alpha: 0.70, color: '210,180,140' }
-  ];
-  for (const ring of rings) {
-    const r = innerR + (outerR - innerR) * ring.frac;
-    const ry = r * tilt;
-    ctx.strokeStyle = `rgba(${ring.color},${ring.alpha})`;
-    ctx.lineWidth = (outerR - innerR) * 0.18;
-    ctx.beginPath();
-    ctx.ellipse(b.x, b.y, r, ry, 0,
-      backHalf ? Math.PI : 0,
-      backHalf ? 2 * Math.PI : Math.PI);
-    ctx.stroke();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  // Only realistic mode gets the photo-derived ring profile + axial-tilt lean (to
+  // match the tilted globe). Non-realistic mode keeps the simple cartoon bands,
+  // drawn flat (no lean) like the upright cartoon planet.
+  const tiltA = realisticMode ? axialTiltRad(b) : 0;
+  if (tiltA) { ctx.translate(p.sx, p.sy); ctx.rotate(tiltA); ctx.translate(-p.sx, -p.sy); }
+  const prof = realisticMode ? getSaturnRingProfile() : null;
+  if (prof) {
+    // Real ring profile: one fine concentric band per sample, using the photo's
+    // actual colour + alpha. Transparent samples (the Cassini division & gaps)
+    // are skipped, so they read as true gaps.
+    const N = prof.length, lw = span / N + 0.7;
+    for (let i = 0; i < N; i++) {
+      const s = prof[i];
+      if (s.a < 10) continue;
+      const rr = innerR + span * (i / (N - 1));
+      ctx.strokeStyle = `rgba(${s.r},${s.g},${s.b},${(s.a / 255) * 0.92})`;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.ellipse(p.sx, p.sy, rr, rr * tilt, 0, a0, a1);
+      ctx.stroke();
+    }
+  } else {
+    // Simple cartoon bands (with a Cassini gap) — used in non-realistic mode and
+    // as the loading fallback before the real ring texture arrives.
+    const bands = [
+      { f0: 0.00, f1: 0.28, a: 0.35, c: '200,185,150' }, // C ring
+      { f0: 0.28, f1: 0.60, a: 0.85, c: '236,216,182' }, // B ring (bright)
+      { f0: 0.70, f1: 1.00, a: 0.60, c: '212,192,158' }  // A ring (after Cassini gap)
+    ];
+    for (const bd of bands) {
+      const rr = innerR + span * (bd.f0 + bd.f1) / 2;
+      ctx.strokeStyle = `rgba(${bd.c},${bd.a})`;
+      ctx.lineWidth = span * (bd.f1 - bd.f0);
+      ctx.beginPath();
+      ctx.ellipse(p.sx, p.sy, rr, rr * tilt, 0, a0, a1);
+      ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -2466,46 +3382,72 @@ function updateRockets(dtUnits) {
 }
 
 function drawSingleRocket(r, t) {
-  // Flame trail (skip when sitting on a planet surface)
+  // Draw in SCREEN space (not the camera-transformed world frame). drawBody
+  // resets the transform to RENDER_DPR each call, so by the time rockets draw
+  // the world camera transform is gone — using world coords here would land the
+  // rocket in a screen corner. Compute the screen position ourselves instead;
+  // this also keeps the rocket shake-free at the extreme follow-zoom.
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const sx = (r.x - viewX) * viewZoom + w / 2;
+  const sy = (r.y - viewY) * viewZoom + h / 2;
+  // Real scale: 2,000,000× smaller than Earth. The rocket art spans ~8 units
+  // from its centre, so scale so that becomes Earth's radius / 2e6. (This makes
+  // it microscopic — use 🚀 Follow Rocket and zoom right in to see it.)
+  const _earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
+  const _earthR = _earthB ? _earthB.radius : 0.2564;
+  const _rs = (_earthR / 2e6) / 8;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.translate(sx, sy);
+  ctx.rotate(r.heading);
+  // local-units → screen-pixels: world-scale (_rs) composed with the camera zoom.
+  const _ss = _rs * viewZoom;
+  ctx.scale(_ss, _ss);
+
+  // Twin-layer exhaust plume from the nozzle (behind the body), skip when landed.
   if (r.state !== 'landed') {
-    const flameLen = 10 + 4 * Math.sin(t * 0.02);
-    const fx = r.x - Math.cos(r.heading) * flameLen;
-    const fy = r.y - Math.sin(r.heading) * flameLen;
+    const fl = 8 + 3 * Math.sin(t * 0.05);          // flicker
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const fg = ctx.createLinearGradient(r.x, r.y, fx, fy);
-    fg.addColorStop(0, 'rgba(255,220,80,0.95)');
-    fg.addColorStop(0.5, 'rgba(255,120,40,0.55)');
+    let fg = ctx.createLinearGradient(-5, 0, -5 - fl, 0);
+    fg.addColorStop(0, 'rgba(255,150,40,0.85)');
     fg.addColorStop(1, 'rgba(255,40,20,0)');
-    ctx.strokeStyle = fg;
-    ctx.lineCap = 'round';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(r.x, r.y);
-    ctx.lineTo(fx, fy);
-    ctx.stroke();
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.moveTo(-5, -1.6); ctx.lineTo(-5, 1.6); ctx.lineTo(-5 - fl, 0); ctx.closePath(); ctx.fill();
+    fg = ctx.createLinearGradient(-5, 0, -5 - fl * 0.6, 0);
+    fg.addColorStop(0, 'rgba(255,255,210,0.95)');
+    fg.addColorStop(1, 'rgba(255,200,80,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.moveTo(-5, -0.8); ctx.lineTo(-5, 0.8); ctx.lineTo(-5 - fl * 0.6, 0); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
 
-  // Rocket body — small triangle
-  ctx.save();
-  ctx.translate(r.x, r.y);
-  ctx.rotate(r.heading);
-  ctx.fillStyle = '#e8eef5';
-  ctx.beginPath();
-  ctx.moveTo(7, 0);
-  ctx.lineTo(-4, 3);
-  ctx.lineTo(-4, -3);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = '#7dd3fc';
-  ctx.lineWidth = 0.8;
-  ctx.stroke();
-  // Cockpit window
+  // Engine nozzle (dark) + red tail fins.
+  ctx.fillStyle = '#565c66';
+  ctx.beginPath(); ctx.moveTo(-4, -1.4); ctx.lineTo(-5, -1.7); ctx.lineTo(-5, 1.7); ctx.lineTo(-4, 1.4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#d8392a';
+  ctx.beginPath(); ctx.moveTo(-4, -1.8); ctx.lineTo(-7, -3.4); ctx.lineTo(-3, -0.6); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-4, 1.8); ctx.lineTo(-7, 3.4); ctx.lineTo(-3, 0.6); ctx.closePath(); ctx.fill();
+
+  // White cylindrical body with top-lit shading.
+  ctx.fillStyle = '#eef2f7';
+  ctx.fillRect(-4, -2, 8, 4);
+  const bg = ctx.createLinearGradient(0, -2, 0, 2);
+  bg.addColorStop(0, 'rgba(255,255,255,0.28)');
+  bg.addColorStop(0.5, 'rgba(255,255,255,0)');
+  bg.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = bg;
+  ctx.fillRect(-4, -2, 8, 4);
+
+  // Red nose cone.
+  ctx.fillStyle = '#e0463a';
+  ctx.beginPath(); ctx.moveTo(4, -2); ctx.lineTo(8, 0); ctx.lineTo(4, 2); ctx.closePath(); ctx.fill();
+
+  // Cockpit window.
   ctx.fillStyle = '#7dd3fc';
-  ctx.beginPath();
-  ctx.arc(1, 0, 1.2, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.beginPath(); ctx.arc(1.2, 0, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(20,45,70,0.55)';
+  ctx.lineWidth = 0.35; ctx.stroke();
   ctx.restore();
 }
 
@@ -4035,6 +4977,12 @@ function drawBody(b, t) {
   // exaggeration swap.)
   const _bodyOrigR = b.radius;
   if (sizeExaggeration !== 1) b.radius = b.radius * sizeExaggeration;
+  // Axial spin — rotate the whole body (disc + surface features + corona)
+  // around its own center. _spun is restored in the finally so the canvas
+  // transform never leaks past the early `return`s inside the branches.
+  // Asteroids (symmetric dots) and comets (physics-oriented tail) are
+  // excluded — they return before the spin transform is applied.
+  let _spun = false;
   try {
 
   // Asteroids and comets are batch-drawn outside drawBody for perf — the
@@ -4051,6 +4999,20 @@ function drawBody(b, t) {
   if (b.isComet) {
     drawCometSingle(b);
     return;
+  }
+
+  // Apply axial spin for suns / planets / moons — EXCEPT for bodies rendered
+  // with a scrolled texture (Earth/Moon/Mercury in realistic mode). Those
+  // convey rotation by scrolling the texture; rotating the canvas around their
+  // huge AU-scale coordinates introduces per-frame float jitter that looks
+  // like the body "shaking" when zoomed in.
+  const _spin = b.spin || 0;
+  if (_spin !== 0 && !usesScrolledTexture(b)) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(_spin);
+    ctx.translate(-b.x, -b.y);
+    _spun = true;
   }
 
   if (b.isSun) {
@@ -4175,84 +5137,137 @@ function drawBody(b, t) {
     if (_isSaturn) drawSaturnRings(b, true, 1);
     else if (_isJ1407b) drawJ1407bRings(b, true);
 
-    // Dwarf-star halo: soft outer glow when mass > 50
-    if (b.mass > 50) {
-      const hex = b.color || '#ffffff';
-      const cr = parseInt(hex.slice(1,3),16) || 255;
-      const cg = parseInt(hex.slice(3,5),16) || 255;
-      const cb = parseInt(hex.slice(5,7),16) || 255;
-      const haloR = b.radius * 3.2;
+    // Body draw. In 2D, render in a SCREEN-SPACE local frame (centred at the
+    // body's screen position, scaled by zoom, rotated by spin) so every path
+    // coordinate is small — this kills the float-precision "shaking" you get
+    // drawing a body at huge AU-scale world coords under high zoom. Features draw
+    // relative to (0,0). 3D keeps its existing world-space path.
+    if (!is3D) {
+      const _p = bodyScreenPos(b);
+      const _scl = _p.scale || 1;
+      const _r = b.radius;
+      if (_r * _scl >= 0.25) {
+        ctx.save();
+        ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+        ctx.translate(_p.sx, _p.sy);
+        ctx.scale(_scl, _scl);
+        ctx.rotate(b.spin || 0);
+        if (b.mass > 50) {                      // dwarf-star halo
+          const hex = b.color || '#ffffff';
+          const cr = parseInt(hex.slice(1,3),16) || 255, cg = parseInt(hex.slice(3,5),16) || 255, cb = parseInt(hex.slice(5,7),16) || 255;
+          const haloR = _r * 3.2;
+          ctx.save(); ctx.globalCompositeOperation = 'lighter';
+          const halo = ctx.createRadialGradient(0, 0, _r * 0.6, 0, 0, haloR);
+          halo.addColorStop(0, `rgba(${cr},${cg},${cb},0.35)`);
+          halo.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.12)`);
+          halo.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+          ctx.fillStyle = halo;
+          ctx.beginPath(); ctx.arc(0, 0, haloR, 0, Math.PI * 2); ctx.fill();
+          ctx.restore();
+        }
+        ctx.save();                             // glow + disc
+        ctx.shadowColor = b.color;
+        ctx.shadowBlur = b.mass > 50 ? 22 : 15;
+        ctx.fillStyle = b.color;
+        ctx.beginPath(); ctx.arc(0, 0, _r, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+        if (b.continents) {                     // green continents
+          ctx.save();
+          ctx.beginPath(); ctx.arc(0, 0, _r, 0, Math.PI * 2); ctx.clip();
+          for (const c of b.continents) {
+            const cx = Math.cos(c.angle) * c.distFrac * _r;
+            const cy = Math.sin(c.angle) * c.distFrac * _r;
+            const cr2 = c.sizeFrac * _r;
+            const gShade = Math.round(140 + c.shade * 70);
+            ctx.fillStyle = `rgb(40, ${gShade}, 60)`;
+            ctx.beginPath(); ctx.arc(cx, cy, cr2, 0, Math.PI * 2); ctx.fill();
+          }
+          ctx.restore();
+        }
+        if (isJupiterLike(b)) drawJupiterSpot(b, 0, 0);
+        if (isPlutoLike(b)) drawPlutoHeart(b, 0, 0);
+        const hg = ctx.createRadialGradient(-_r * 0.3, -_r * 0.3, 0, 0, 0, _r);   // highlight
+        hg.addColorStop(0, 'rgba(255,255,255,0.35)');
+        hg.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = hg;
+        ctx.beginPath(); ctx.arc(0, 0, _r, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();                          // end body local frame
+        if (_isSaturn) drawSaturnRings(b, false, 1);   // rings front (screen-space)
+        else if (_isJ1407b) drawJ1407bRings(b, false);
+        ctx.save();                             // face in its own local frame
+        ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+        ctx.translate(_p.sx, _p.sy);
+        ctx.scale(_scl, _scl);
+        ctx.rotate(b.spin || 0);
+        drawFace(0, 0, _r, 'happy', '#111');
+        ctx.restore();
+      }
+    } else {
+      // 3D path — world-space draws (unchanged).
+      if (b.mass > 50) {
+        const hex = b.color || '#ffffff';
+        const cr = parseInt(hex.slice(1,3),16) || 255;
+        const cg = parseInt(hex.slice(3,5),16) || 255;
+        const cb = parseInt(hex.slice(5,7),16) || 255;
+        const haloR = b.radius * 3.2;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const halo = ctx.createRadialGradient(b.x, b.y, b.radius * 0.6, b.x, b.y, haloR);
+        halo.addColorStop(0, `rgba(${cr},${cg},${cb},0.35)`);
+        halo.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.12)`);
+        halo.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, haloR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const halo = ctx.createRadialGradient(b.x, b.y, b.radius * 0.6, b.x, b.y, haloR);
-      halo.addColorStop(0, `rgba(${cr},${cg},${cb},0.35)`);
-      halo.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.12)`);
-      halo.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, haloR, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Planet glow
-    ctx.save();
-    ctx.shadowColor = b.color;
-    ctx.shadowBlur = b.mass > 50 ? 22 : 15;
-    ctx.fillStyle = b.color;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-
-    // Earth-like life: green continents on the surface
-    if (b.continents) {
-      ctx.save();
+      ctx.shadowColor = b.color;
+      ctx.shadowBlur = b.mass > 50 ? 22 : 15;
+      ctx.fillStyle = b.color;
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-      ctx.clip();
-      for (const c of b.continents) {
-        const cx = b.x + Math.cos(c.angle) * c.distFrac * b.radius;
-        const cy = b.y + Math.sin(c.angle) * c.distFrac * b.radius;
-        const cr = c.sizeFrac * b.radius;
-        const gShade = Math.round(140 + c.shade * 70); // 140–210
-        ctx.fillStyle = `rgb(40, ${gShade}, 60)`;
-        ctx.beginPath();
-        ctx.arc(cx, cy, cr, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      ctx.fill();
       ctx.restore();
+      if (b.continents) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+        ctx.clip();
+        for (const c of b.continents) {
+          const cx = b.x + Math.cos(c.angle) * c.distFrac * b.radius;
+          const cy = b.y + Math.sin(c.angle) * c.distFrac * b.radius;
+          const cr = c.sizeFrac * b.radius;
+          const gShade = Math.round(140 + c.shade * 70);
+          ctx.fillStyle = `rgb(40, ${gShade}, 60)`;
+          ctx.beginPath();
+          ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+      if (isJupiterLike(b)) drawJupiterSpot(b);
+      if (isPlutoLike(b)) drawPlutoHeart(b);
+      const hg = ctx.createRadialGradient(b.x - b.radius * 0.3, b.y - b.radius * 0.3, 0, b.x, b.y, b.radius);
+      hg.addColorStop(0, 'rgba(255,255,255,0.35)');
+      hg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = hg;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+      ctx.fill();
+      if (_isSaturn) drawSaturnRings(b, false, 1);
+      else if (_isJ1407b) drawJ1407bRings(b, false);
+      drawFace(b.x, b.y, b.radius, 'happy', '#111');
     }
-
-    // Jupiter Great Red Spot
-    if (isJupiterLike(b)) drawJupiterSpot(b);
-
-    // Pluto Tombaugh Regio (light brown heart)
-    if (isPlutoLike(b)) drawPlutoHeart(b);
-
-    // Highlight
-    const hg = ctx.createRadialGradient(b.x - b.radius * 0.3, b.y - b.radius * 0.3, 0, b.x, b.y, b.radius);
-    hg.addColorStop(0, 'rgba(255,255,255,0.35)');
-    hg.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = hg;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Planetary rings — front half drawn on top of the body and highlight
-    if (_isSaturn) drawSaturnRings(b, false, 1);
-    else if (_isJ1407b) drawJ1407bRings(b, false);
-
-    // Face on planets and moons. Dwarf stars (mass > 50) get the same treatment.
-    const planetMood = b.continents ? 'happy' : 'happy';
-    drawFace(b.x, b.y, b.radius, planetMood, '#111');
 
     // Restore the body's stored radius so physics / sliders see the real value
     if (_displayR !== _origR) b.radius = _origR;
   }
 
   } finally {
-    // Restore the min-screen-radius swap from the top of the function.
+    // Unwind the spin transform (if applied) then restore the real radius.
+    if (_spun) ctx.restore();
     b.radius = _bodyOrigR;
   }
 }
@@ -4312,6 +5327,28 @@ function drawAsteroidsBatched3D() {
 // realisticMode the tail is layered (5 stacked tapered strokes from a
 // wide pale-blue haze down to a bright white spine) and the nucleus
 // gets a wider blue-white halo to match the reference photo.
+// Cache a comet's tail "rays" (filaments) once, so the filamentary tail stays
+// fixed instead of flickering each frame. Ion rays hug the anti-sun axis in a
+// tight cone; dust rays spread wider. Angles in radians, len/width as fractions.
+function ensureCometStreamers(b) {
+  if (b._cometStreamers) return b._cometStreamers;
+  const ion = [], dust = [];
+  for (let i = 0; i < 16; i++) ion.push({
+    ang: (Math.random() * 2 - 1) * 0.13,
+    len: 0.70 + Math.random() * 0.42,
+    w:   0.0018 + Math.random() * 0.0055,
+    a:   0.08 + Math.random() * 0.15
+  });
+  for (let i = 0; i < 12; i++) dust.push({
+    ang: (Math.random() * 2 - 1) * 0.20,
+    len: 0.42 + Math.random() * 0.34,
+    w:   0.004 + Math.random() * 0.010,
+    a:   0.06 + Math.random() * 0.11
+  });
+  b._cometStreamers = { ion, dust };
+  return b._cometStreamers;
+}
+
 function drawCometSingle(b) {
   let nearest = null, bestDistSq = Infinity;
   for (const s of bodies) {
@@ -4331,43 +5368,88 @@ function drawCometSingle(b) {
       const tipY = b.y + uy * tailLen;
 
       if (realisticMode) {
-        // Five-layer tail: from the widest outer haze to the brightest
-        // inner spine. Widths are fractions of an AU, alphas decay to 0
-        // 70% of the way along so the tip fades smoothly.
-        const layers = [
-          { wFrac: 0.026, r: 130, g: 165, bC: 220, a: 0.40 },
-          { wFrac: 0.018, r: 165, g: 200, bC: 240, a: 0.55 },
-          { wFrac: 0.011, r: 205, g: 225, bC: 250, a: 0.70 },
-          { wFrac: 0.006, r: 235, g: 245, bC: 255, a: 0.85 },
-          { wFrac: 0.0025, r: 255, g: 255, bC: 255, a: 0.95 }
-        ];
-        for (const ly of layers) {
-          const baseW = _AU_SIM_UNITS * ly.wFrac;
-          const c = (a) => `rgba(${ly.r},${ly.g},${ly.bC},${a})`;
+        // Modelled on real comet imagery, with three realism layers beyond a
+        // simple wedge: (1) ACTIVITY — the tail/coma grow and brighten as the
+        // comet nears the Sun and fade when far (a comet is only spectacular near
+        // perihelion); (2) a FILAMENTARY tail of cached rays — a straight blue
+        // ION tail dead anti-sunward, plus a CURVED whiter DUST tail that bows
+        // toward the trailing side (dust lags the orbit); (3) a sunward parabolic
+        // HOOD and a faint green inner coma. Additive blending → emission glow.
+        const distAU = dist / _AU_SIM_UNITS;
+        const act = 0.4 + 0.6 * Math.max(0, Math.min(1, (3.0 - distAU) / 2.5));
+        const tl = tailLen * act;                               // tail grows near Sun
+        const v = Math.hypot(b.vx || 0, b.vy || 0) || 1;
+        const avx = -(b.vx || 0) / v, avy = -(b.vy || 0) / v;   // anti-velocity
+        let ddx = ux * 0.82 + avx * 0.34, ddy = uy * 0.82 + avy * 0.34;  // dust axis
+        const dl = Math.hypot(ddx, ddy) || 1; ddx /= dl; ddy /= dl;
+        const plume = (tipX, tipY, baseW, col, a) => {          // straight tapered sliver
+          const ax = tipX - b.x, ay = tipY - b.y;
+          const pl = Math.hypot(ax, ay) || 1, nx = -ay / pl, ny = ax / pl;
           const grad = ctx.createLinearGradient(b.x, b.y, tipX, tipY);
-          grad.addColorStop(0,    c(ly.a));
-          grad.addColorStop(0.55, c(ly.a * 0.45));
-          grad.addColorStop(1,    c(0));
+          grad.addColorStop(0,   `rgba(${col},${a})`);
+          grad.addColorStop(0.5, `rgba(${col},${a * 0.4})`);
+          grad.addColorStop(1,   `rgba(${col},0)`);
           ctx.fillStyle = grad;
           ctx.beginPath();
-          ctx.moveTo(b.x + px * baseW, b.y + py * baseW);
-          ctx.lineTo(b.x - px * baseW, b.y - py * baseW);
+          ctx.moveTo(b.x + nx * baseW, b.y + ny * baseW);
+          ctx.lineTo(b.x - nx * baseW, b.y - ny * baseW);
           ctx.lineTo(tipX, tipY);
           ctx.closePath();
           ctx.fill();
-        }
-        // Coma — bluish glow around the nucleus.
-        const haloR = Math.max(b.radius * 8, _AU_SIM_UNITS * 0.003);
-        const halo = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, haloR);
-        halo.addColorStop(0,    'rgba(255, 255, 255, 0.95)');
-        halo.addColorStop(0.30, 'rgba(200, 225, 255, 0.55)');
-        halo.addColorStop(0.70, 'rgba(140, 175, 230, 0.20)');
-        halo.addColorStop(1,    'rgba(80, 110, 180, 0)');
+        };
+        const ionRay = (ang, lenF, w, a) => {                   // straight blue filament
+          const c = Math.cos(ang), s = Math.sin(ang);
+          const rx = ux * c - uy * s, ry = ux * s + uy * c;
+          plume(b.x + rx * tl * lenF, b.y + ry * tl * lenF, _AU_SIM_UNITS * w, '170,200,250', a);
+        };
+        const dustRay = (ang, lenF, w, a) => {                  // CURVED whiter filament
+          const c = Math.cos(ang), s = Math.sin(ang);
+          const rx = ddx * c - ddy * s, ry = ddx * s + ddy * c;
+          const len = tl * lenF;
+          const ex = b.x + rx * len, ey = b.y + ry * len;
+          const cxp = b.x + rx * len * 0.5 + avx * len * 0.22;  // control bows to trailing
+          const cyp = b.y + ry * len * 0.5 + avy * len * 0.22;
+          const grad = ctx.createLinearGradient(b.x, b.y, ex, ey);
+          grad.addColorStop(0,   `rgba(244,246,252,${a})`);
+          grad.addColorStop(0.5, `rgba(238,241,250,${a * 0.4})`);
+          grad.addColorStop(1,   `rgba(232,236,247,0)`);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = _AU_SIM_UNITS * w;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y);
+          ctx.quadraticCurveTo(cxp, cyp, ex, ey);
+          ctx.stroke();
+        };
+        const S = ensureCometStreamers(b);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        // Diffuse haze: broad curved dust + narrow straight ion.
+        dustRay(0, 0.82, 0.06, 0.10 * act);
+        plume(b.x + ux * tl, b.y + uy * tl, _AU_SIM_UNITS * 0.020, '110,150,225', 0.10 * act);
+        // Filament rays (cached so they don't flicker).
+        for (const st of S.ion)  ionRay(st.ang, st.len, st.w, st.a * act);
+        for (const st of S.dust) dustRay(st.ang, st.len, st.w * 1.4, st.a * act);
+        // Coma — white core → faint green inner tint → blue-white glow.
+        const comaR = Math.max(b.radius * 10, _AU_SIM_UNITS * 0.011) * (0.7 + 0.3 * act);
+        const halo = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, comaR);
+        halo.addColorStop(0,    'rgba(255,255,255,0.98)');
+        halo.addColorStop(0.16, 'rgba(220,245,235,0.72)');      // subtle green (C2 glow)
+        halo.addColorStop(0.45, 'rgba(170,205,250,0.30)');
+        halo.addColorStop(1,    'rgba(110,145,215,0)');
         ctx.fillStyle = halo;
         ctx.beginPath();
-        ctx.arc(b.x, b.y, haloR, 0, Math.PI * 2);
+        ctx.arc(b.x, b.y, comaR, 0, Math.PI * 2);
         ctx.fill();
-        // Nucleus core
+        // Sunward parabolic hood — bright arc on the Sun-facing side of the coma.
+        const sunAng = Math.atan2(-uy, -ux);
+        ctx.strokeStyle = `rgba(210,238,255,${0.45 * act})`;
+        ctx.lineWidth = comaR * 0.10;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, comaR * 0.82, sunAng - 1.15, sunAng + 1.15);
+        ctx.stroke();
+        ctx.restore();
+        // Nucleus core (opaque).
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
         ctx.arc(b.x, b.y, Math.max(b.radius, 0.6), 0, Math.PI * 2);
@@ -4517,6 +5599,8 @@ function drawMergeEffects3D() {
 let viewX = 0, viewY = 0;     // world-space point centered on screen
 let viewZoom = 1;             // 1 = default; >1 zooms in
 let autoFollow = true;
+let lockTargetId = null;   // camera-lock: when set, the view re-centers on this body every frame
+let followRocket = false;  // when on, the camera follows the first rocket each frame
 
 // ---- 3D Mode ----
 // When is3D is true, bodies carry z + vz and rendering applies a perspective
@@ -4602,6 +5686,7 @@ function screenToWorld(sx, sy) {
 }
 
 // ---- Main loop ----
+let _frameSuns = [];   // suns, refreshed once per frame (used by day/night shading)
 function loop(t) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   ctx.clearRect(0, 0, w, h);
@@ -4628,6 +5713,48 @@ function loop(t) {
   // animations slow with the simulation (and speed up at higher multipliers).
   const realDt = lastLoopTime > 0 ? (t - lastLoopTime) : 16.67;
   if (!paused) animTime += realDt * speedMul;
+
+  // Advance each body's axial spin. Scaled by the speed multiplier so spin
+  // speeds up with the time-warp (at 1× it matches the calm calibrated rate;
+  // at higher multipliers it spins proportionally faster, tracking the orbits),
+  // and frozen while paused. Asteroids (symmetric) and comets (tail is
+  // physics-oriented) are skipped. Bodies named after real solar-system objects
+  // use their true rotation period (calibrated so 24 sim-hours = 12 real seconds
+  // at 1×), preserving the relative speeds and Venus's retrograde direction;
+  // everything else keeps a cached random spin.
+  if (!paused) {
+    const spinDt = (realDt / 1000) * speedMul;
+    for (const sb of bodies) {
+      if (sb.isAsteroid || sb.isComet) continue;
+      if (sb.spin === undefined) sb.spin = Math.random() * Math.PI * 2;
+      // Hand-rotation (mouse drag) takes over — don't let auto-spin fight it.
+      if (sb._manualRotating) continue;
+      // Earth's Moon is tidally locked — synchronous rotation, so the same face
+      // always points at Earth. Only Earth's moon; other moons keep a free spin.
+      if (sb.isMoon && (sb.rootPlanetName || '').toLowerCase() === 'earth') {
+        const parent = findMoonParent(sb);
+        if (parent) {
+          sb.spin = Math.atan2(parent.y - sb.y, parent.x - sb.x);
+          continue;
+        }
+      }
+      const named = namedSpinRate((sb.name || '').toLowerCase());
+      let rate;
+      if (named !== undefined) {
+        rate = named;
+      } else {
+        if (sb.spinRate === undefined) {
+          // 0.15–0.65 rad/s (~10–40 s per rotation); ~15% spin retrograde.
+          sb.spinRate = (0.15 + Math.random() * 0.5) * (Math.random() < 0.15 ? -1 : 1);
+        }
+        rate = sb.spinRate;
+      }
+      sb.spin += rate * spinDt;
+      // Wrap to [0, 2π) so spin stays precise at huge speed multipliers (only
+      // spin mod 2π affects rendering; unbounded growth would lose precision).
+      sb.spin %= Math.PI * 2;
+    }
+  }
 
   ctx.save();
   if (universeDisc) {
@@ -4672,7 +5799,33 @@ function loop(t) {
   lastLoopTime = t;
 
   // Auto-follow the most massive sun (until the user pans/zooms manually)
-  if (autoFollow) {
+  // Camera lock takes priority over auto-follow: re-center on the locked body
+  // every frame so it appears stationary and central, with everything else
+  // moving relative to it.
+  if (followRocket && rockets.length) {
+    // Follow-rocket takes top priority: keep the (first) rocket centred AND ease
+    // the zoom in until the rocket fills ~80% of the screen (it's microscopic, so
+    // this needs an enormous zoom). Auto-releases when no rockets are left.
+    const rk = rockets[0];
+    viewX = rk.x;
+    viewY = rk.y;
+    const earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
+    const earthR = earthB ? earthB.radius : 0.2564;
+    const rocketLen = (earthR / 2e6) / 8 * 16;        // base art length (16u) × scale
+    const targetZoom = 0.8 * Math.min(w, h) / rocketLen;
+    viewZoom += (targetZoom - viewZoom) * 0.15;        // smooth zoom-in to ~80%
+  } else if (followRocket && !rockets.length) {
+    followRocket = false;    // nothing left to follow
+  } else if (lockTargetId) {
+    const target = bodies.find(b => b.id === lockTargetId);
+    if (target) {
+      viewX = target.x;
+      viewY = target.y;
+    } else {
+      lockTargetId = null;   // target was removed/merged — release the lock
+      buildControls();
+    }
+  } else if (autoFollow) {
     const suns = bodies.filter(b => b.isSun);
     if (suns.length > 0) {
       const primarySun = suns.reduce((a, b) => a.mass >= b.mass ? a : b);
@@ -4680,6 +5833,9 @@ function loop(t) {
       viewY = primarySun.y;
     }
   }
+
+  // Per-frame suns cache for day/night shading (avoids rescanning all bodies).
+  _frameSuns = bodies.filter(b => b.isSun);
 
   // Selection bookkeeping (used by both 2D and 3D paths below)
   const bodyA = selectedBodyAId ? bodies.find(b => b.id === selectedBodyAId) : null;
@@ -4703,7 +5859,9 @@ function loop(t) {
     // any trail point further from the camera than the FURTHEST sun is "in
     // back" (drawn before suns, so the sun disc occludes it). Everything
     // else is "in front" (drawn after suns and most planets).
-    const projected = bodies.map(b => ({ body: b, depth: project3D(b.x, b.y, b.z || 0).z }));
+    // Exclude asteroids — they're batch-drawn (drawAsteroidsBatched3D), so
+    // projecting + depth-sorting thousands of them here every frame was wasted.
+    const projected = bodies.filter(b => !b.isAsteroid).map(b => ({ body: b, depth: project3D(b.x, b.y, b.z || 0).z }));
     const sunsSorted    = projected.filter(p => p.body.isSun ).sort((a, b) => b.depth - a.depth);
     const planetsSorted = projected.filter(p => !p.body.isSun).sort((a, b) => b.depth - a.depth);
     // Cache the deepest sun's z so back-trail classification is one number.
@@ -4978,6 +6136,7 @@ function buildControls() {
         <div class="body-card-header">
           <span class="body-name"><span class="body-dot" onclick="cameraGoTo('${s.id}')" style="color:${s.color};background:${s.color};cursor:pointer" title="Focus camera"></span><span onclick="renameBody('${s.id}')" style="cursor:pointer" title="Click to rename">${s.name}</span></span>
           <div class="card-actions">
+            <button class="orbit-btn" onclick="lockCameraTo('${s.id}')" title="Lock the camera onto this body (makes it the center of the view)" style="${lockTargetId === s.id ? 'background:rgba(125,211,252,0.35);border-color:#7dd3fc;color:#7dd3fc' : ''}">🎯</button>
             <button class="orbit-btn" onclick="orbitBody('${s.id}')" title="Orbit another body">⟳</button>
             <button class="${sunLockCls}" onclick="toggleLock('${s.id}')" title="${s.locked ? 'Unlock' : 'Lock in place'}">${sunLockIcon}</button>
             <button class="remove-btn" onclick="removeSun('${s.id}')" title="Remove">✕</button>
@@ -4999,18 +6158,14 @@ function buildControls() {
     sunEl.innerHTML = sunHtml;
   }
 
-  // Planets
+  // Planets + Moons — moons get their own section so a planet's satellites
+  // are grouped separately. Asteroids are excluded entirely (a belt of
+  // hundreds would overwhelm the panel).
   const pc = document.getElementById('planet-controls');
-  // Asteroids are excluded from the body card list — a belt of hundreds
-  // would overwhelm the panel and they have no per-instance settings to tweak.
-  const planets = bodies.filter(b => !b.isSun && !b.isAsteroid);
-  if (planets.length === 0) {
-    pc.innerHTML = '<p style="color:#555;font-size:0.8em;padding:8px">No planets. Click "Add Planet" to create one.</p>';
-    populateBodySelect();
-    return;
-  }
-  let html = '';
-  for (const p of planets) {
+  const mc = document.getElementById('moon-controls');
+  const nonSun = bodies.filter(b => !b.isSun && !b.isAsteroid);
+  let planetHtml = '', moonHtml = '';
+  for (const p of nonSun) {
     const vmul = p.velMul !== undefined ? p.velMul : 1;
     const isMoon = p.isMoon === true;
     const isDwarfStar   = !isMoon && p.mass > 50;
@@ -5025,17 +6180,19 @@ function buildControls() {
     let typeLabel = '';
     if (isDwarfStar)        typeLabel = '<div style="font-size:0.7em;color:#a78bfa;margin-bottom:6px;letter-spacing:0.3px">◐ Dwarf Star</div>';
     else if (isDwarfPlanet) typeLabel = '<div style="font-size:0.7em;color:#9ca3af;margin-bottom:6px;letter-spacing:0.3px">◌ Dwarf Planet</div>';
-    else if (isMoon)        typeLabel = '<div style="font-size:0.7em;color:#a0a4ad;margin-bottom:6px;letter-spacing:0.3px">🌑 Moon</div>';
+    else if (isMoon)        typeLabel = `<div style="font-size:0.7em;color:#a0a4ad;margin-bottom:6px;letter-spacing:0.3px">🌑 Moon${p.rootPlanetName ? ' of ' + p.rootPlanetName : ''}</div>`;
     else if (isPlanet)      typeLabel = '<div style="font-size:0.7em;color:#7dd3fc;margin-bottom:6px;letter-spacing:0.3px">🪐 Planet</div>';
-    html += `
+    const removeFn = isMoon ? 'removePlanet' : 'removePlanet';
+    const card = `
       <div class="body-card" id="card-${p.id}">
         <div class="body-card-header">
           <span class="body-name"><span class="body-dot" onclick="cameraGoTo('${p.id}')" style="color:${p.color};background:${p.color};cursor:pointer" title="Focus camera"></span><span onclick="renameBody('${p.id}')" style="cursor:pointer" title="Click to rename">${p.name}</span></span>
           <div class="card-actions">
-            <button class="moon-btn" onclick="addMoonTo('${p.id}')" title="Add a moon orbiting this planet">🌑</button>
+            <button class="orbit-btn" onclick="lockCameraTo('${p.id}')" title="Lock the camera onto this body (makes it the center of the view)" style="${lockTargetId === p.id ? 'background:rgba(125,211,252,0.35);border-color:#7dd3fc;color:#7dd3fc' : ''}">🎯</button>
+            <button class="moon-btn" onclick="addMoonTo('${p.id}')" title="Add a moon orbiting this body">🌑</button>
             <button class="orbit-btn" onclick="orbitBody('${p.id}')" title="Orbit another body">⟳</button>
             <button class="${planetLockCls}" onclick="toggleLock('${p.id}')" title="${p.locked ? 'Unlock' : 'Lock in place'}">${planetLockIcon}</button>
-            <button class="remove-btn" onclick="removePlanet('${p.id}')" title="Remove">✕</button>
+            <button class="remove-btn" onclick="${removeFn}('${p.id}')" title="Remove">✕</button>
           </div>
         </div>
         ${typeLabel}
@@ -5050,8 +6207,10 @@ function buildControls() {
             oninput="updatePlanetVel('${p.id}',this.value)">
         </div>
       </div>`;
+    if (isMoon) moonHtml += card; else planetHtml += card;
   }
-  pc.innerHTML = html;
+  pc.innerHTML = planetHtml || '<p style="color:#555;font-size:0.8em;padding:8px">No planets. Click "Add Planet" to create one.</p>';
+  if (mc) mc.innerHTML = moonHtml || '<p style="color:#555;font-size:0.8em;padding:8px">No moons. Use 🌑 on a planet card or "Add Moon".</p>';
   populateBodySelect();
 }
 
@@ -5998,9 +7157,23 @@ function spawnMoon(name, color, parentId) {
   const parent = bodies.find(b => b.id === parentId);
   if (!parent) return;
   const mass = 0.1 + Math.random() * 0.4;          // dwarf-planet range
-  const moonRadius = 3 + Math.cbrt(mass) * 2.2;
-  // Aim for a tight orbit close to the parent's surface
-  const dist = parent.radius + 25 + Math.random() * 25;
+  // Size: the average radius of all moons currently in the sim, so a spawned
+  // moon blends in instead of dwarfing the planets (the old mass-based formula
+  // gave ~3 sim units — bigger than most planets at AU scale). Small fallback
+  // if there are no moons yet.
+  const _moons = bodies.filter(b => b.isMoon);
+  const moonRadius = _moons.length
+    ? _moons.reduce((s, m) => s + m.radius, 0) / _moons.length
+    : 0.06;
+  // Scale the orbit to the real lunar distance. A tight close orbit (the old
+  // parent.radius + ~25 sim units) is numerically unstable at AU scale: the
+  // moon orbits so fast the large time step overshoots and flings it away. The
+  // startup Earth–Moon pair uses the real 384,400 km distance and is stable, so
+  // place generic moons the same way (~0.8×–2.2× lunar distance), clamped to
+  // clear the parent's surface.
+  const LUNAR_AU = 384400 / 149597870.7;           // real Earth–Moon distance in AU
+  const dist = Math.max(parent.radius * 4,
+                        _AU_SIM_UNITS * LUNAR_AU * (0.8 + Math.random() * 1.4));
   const angle = Math.random() * Math.PI * 2;
   const pos = findFreeSpawnPos(parent.x + Math.cos(angle) * dist, parent.y + Math.sin(angle) * dist, moonRadius);
   const actDx = pos.x - parent.x, actDy = pos.y - parent.y;
@@ -6216,6 +7389,35 @@ function cameraGoTo(id) {
   autoFollow = false;
   viewX = b.x;
   viewY = b.y;
+}
+
+// Toggle a persistent camera lock on a body. While locked, the render loop
+// re-centers the view on it every frame so it stays put on screen and the
+// rest of the system moves relative to it (it "becomes the center").
+function lockCameraTo(id) {
+  if (lockTargetId === id) {
+    lockTargetId = null;          // clicking the locked body again releases it
+  } else {
+    lockTargetId = id;
+    autoFollow = false;
+    const b = bodies.find(x => x.id === id);
+    if (b) { viewX = b.x; viewY = b.y; }
+  }
+  buildControls();                 // refresh the lock-button highlight
+}
+
+// Toggle camera-follow of a rocket. Releases any body lock / auto-follow so it
+// takes over; if there are no rockets it just flashes an alert.
+function toggleFollowRocket() {
+  if (followRocket) { followRocket = false; }
+  else {
+    if (!rockets.length) { alert('No rockets in flight — they launch from Earth-like planets.'); return; }
+    followRocket = true;
+    lockTargetId = null;
+    autoFollow = false;
+  }
+  const btn = document.getElementById('btn-follow-rocket');
+  if (btn) btn.classList.toggle('active', followRocket);
 }
 
 // Show a picker modal listing every other body; clicking one runs setOrbit.
@@ -7403,6 +8605,8 @@ let panStartViewX = 0, panStartViewY = 0;
 
 function recenterView() {
   autoFollow = true;
+  lockTargetId = null;   // recenter releases any camera lock
+  if (followRocket) { followRocket = false; const fb = document.getElementById('btn-follow-rocket'); if (fb) fb.classList.remove('active'); }
   // Zoom to fit the most distant non-galaxy body (with margin) so the AU-scale
   // solar system is visible by default. Falls back to 1× when there's nothing
   // to fit (e.g. fresh empty scene).
@@ -7542,6 +8746,11 @@ let rotating3D = false;
 let rotateStartX = 0, rotateStartY = 0;
 let rotateStartYaw = 0, rotateStartPitch = 0;
 
+// Body globe-rotation drag state: drag a body to spin it (inspect all sides).
+// Engaged when the camera is locked on the body, or with Ctrl/Cmd held.
+let rotatingBody = null;
+let rotateBodyStartX = 0, rotateBodyStartSpin = 0;
+
 canvas.addEventListener('contextmenu', function(e) {
   // Suppress the context menu so right-click can be used for 3D camera rotation
   if (is3D) e.preventDefault();
@@ -7571,6 +8780,18 @@ canvas.addEventListener('mousedown', function(e) {
 
   const body = findBodyAtScreen(e.clientX, e.clientY);
   if (body) {
+    // Globe rotation: spin the body to inspect all sides, instead of moving it.
+    // Engaged when the camera is locked on this body (it's centered, so moving
+    // it is pointless) or when Ctrl/Cmd is held on any body.
+    if (lockTargetId === body.id || e.ctrlKey || e.metaKey) {
+      rotatingBody = body;
+      rotateBodyStartX = e.clientX;
+      rotateBodyStartSpin = body.spin || 0;
+      body._manualRotating = true;
+      canvas.style.cursor = 'ew-resize';
+      e.preventDefault();
+      return;
+    }
     dragBody = body;
     isDragging = false;
     dragStartX = e.clientX;
@@ -7596,6 +8817,7 @@ canvas.addEventListener('mousedown', function(e) {
   // Empty space: start panning the view
   panning = true;
   autoFollow = false;
+  if (followRocket) { followRocket = false; const fb = document.getElementById('btn-follow-rocket'); if (fb) fb.classList.remove('active'); }
   panStartX = e.clientX;
   panStartY = e.clientY;
   panStartViewX = viewX;
@@ -7629,11 +8851,22 @@ canvas.addEventListener('mousemove', function(e) {
     const dys = e.clientY - rotateStartY;
     cameraYaw = rotateStartYaw + (dxs / w) * Math.PI;
     cameraPitch = rotateStartPitch + (dys / h) * Math.PI;
-    // Clamp pitch so users can't flip the camera fully upside down (gets disorienting)
-    const PITCH_LIMIT = Math.PI / 2 - 0.05;
+    // Clamp pitch to a full 90° (edge-on) either way; beyond that flips upside down.
+    const PITCH_LIMIT = Math.PI / 2;
     if (cameraPitch > PITCH_LIMIT) cameraPitch = PITCH_LIMIT;
     if (cameraPitch < -PITCH_LIMIT) cameraPitch = -PITCH_LIMIT;
     if (typeof syncCameraSliders === 'function') syncCameraSliders();
+    return;
+  }
+
+  // Globe rotation: horizontal drag spins the body. Sensitivity scales with the
+  // body's on-screen radius so it feels like grabbing the surface — dragging
+  // about one radius ≈ one radian of turn.
+  if (rotatingBody) {
+    const sc = bodyScreenPos(rotatingBody).scale || 1;
+    const sr = Math.max(8, rotatingBody.radius * (sizeExaggeration || 1) * sc);
+    const dxs = e.clientX - rotateBodyStartX;
+    rotatingBody.spin = rotateBodyStartSpin - dxs / sr;
     return;
   }
 
@@ -7674,7 +8907,8 @@ canvas.addEventListener('mousemove', function(e) {
     } else {
       const body = findBodyAtScreen(e.clientX, e.clientY);
       if (body) {
-        canvas.style.cursor = 'grab';
+        // ew-resize hints "drag to rotate" when this body would rotate.
+        canvas.style.cursor = (lockTargetId === body.id || e.ctrlKey || e.metaKey) ? 'ew-resize' : 'grab';
       } else if (findGalaxyAtScreen(e.clientX, e.clientY)) {
         canvas.style.cursor = 'grab';
       } else {
@@ -7712,6 +8946,12 @@ canvas.addEventListener('mousemove', function(e) {
 canvas.addEventListener('mouseup', function(e) {
   if (rotating3D) {
     rotating3D = false;
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
+  if (rotatingBody) {
+    rotatingBody._manualRotating = false;   // resume auto-spin from here
+    rotatingBody = null;
     canvas.style.cursor = 'crosshair';
     return;
   }
@@ -7762,6 +9002,10 @@ canvas.addEventListener('mouseup', function(e) {
 canvas.addEventListener('mouseleave', function() {
   if (rotating3D) {
     rotating3D = false;
+  }
+  if (rotatingBody) {
+    rotatingBody._manualRotating = false;
+    rotatingBody = null;
   }
   if (panning) {
     panning = false;
