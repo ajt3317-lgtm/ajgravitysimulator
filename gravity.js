@@ -3669,25 +3669,16 @@ function drawSaucer(cx, cy, R, u, t, realistic) {
   ctx.restore();
 }
 
-// Top-of-screen alien HUD: while a DETECTED invasion is active it warns
-// (inbound / attacking); otherwise it counts down to the next invasion roll.
-// Cloaked (invisible) saucers are deliberately excluded from detection, so the
-// HUD keeps showing the calm countdown even as Earth takes hits.
+// Transient top-of-screen warning while a DETECTED invasion is active (inbound
+// / attacking). Cloaked (invisible) saucers are excluded, so a stealth wave
+// shows no warning even as Earth takes hits.
 function drawInvasionBanner(t) {
-  const w = canvas.clientWidth;
   const detected = ufos.filter(u => !u.invisible);
-  let msg, alpha;
-  if (detected.length) {
-    const attacking = detected.some(u => u.state === 'attacking');
-    msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
-    alpha = 0.55 + 0.45 * Math.sin(t * 0.2);
-  } else if (findMarsBody() && findEarthBody()) {
-    const left = Math.max(0, (UFO_ROLL_MS - _ufoRollAccum) / 1000);
-    msg = `👽 Next alien scan: ${left.toFixed(0)}s · ${Math.round(UFO_CHANCE * 100)}% chance`;
-    alpha = 0.6;
-  } else {
-    return;
-  }
+  if (!detected.length) return;
+  const w = canvas.clientWidth;
+  const attacking = detected.some(u => u.state === 'attacking');
+  const msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
+  const alpha = 0.55 + 0.45 * Math.sin(t * 0.2);
   ctx.save();
   ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
   ctx.font = '700 16px Inter, system-ui, sans-serif';
@@ -6074,21 +6065,14 @@ function loop(t) {
   } else if (followRocket && !rockets.length) {
     followRocket = false;    // nothing left to follow
   } else if (watchAliens && ufos.length) {
-    // Frame Earth (centred) with the saucers + their beams in view so the attack
-    // is watchable. Fits at least the attack ring, but pulls out to keep the
-    // nearest visible saucer on-screen too — so incoming craft track in smoothly.
+    // Frame Earth (centred) at a fixed, tight zoom on the attack ring — the
+    // radius where saucers orbit and fire. Incoming craft simply fly into view
+    // from the edges (no zooming out to chase them across the Mars→Earth gap).
     const earth = findEarthBody();
     if (earth) {
       viewX = earth.x; viewY = earth.y;
-      let need = earth.radius + ufoWorldRadius() * 9;       // min frame = attack ring + margin
-      let nearest = Infinity;
-      for (const u of ufos) {
-        if (u.invisible) continue;
-        const d = Math.hypot(u.x - earth.x, u.y - earth.y);
-        if (d < nearest) nearest = d;
-      }
-      if (isFinite(nearest)) need = Math.max(need, nearest + ufoWorldRadius() * 2);
-      const targetZoom = 0.35 * Math.min(w, h) / Math.max(need, 1e-6);
+      const standoff = earth.radius + ufoWorldRadius() * 7;  // matches updateUfos
+      const targetZoom = 0.35 * Math.min(w, h) / Math.max(standoff, 1e-6);
       viewZoom += (targetZoom - viewZoom) * 0.12;
     } else { watchAliens = false; }
   } else if (watchAliens && !ufos.length) {
