@@ -36,6 +36,7 @@ let bodies = [];
 let stars = [];
 let mergeEffects = [];
 let rockets = [];
+let missions = []; // Scripted launches (e.g. Artemis II free-return). Parametric, not physics-driven, not saved.
 let ufos = [];     // Martian invasion saucers (transient, not gravity-simulated, not saved)
 let galaxies = []; // visual-only galaxies, each { x, y, radius, rotation, centerBodyId }
 let paused = false;
@@ -4542,7 +4543,9 @@ function drawSingleRocket(r, t) {
   // Earth scale (≈ Earth's radius wide).
   const _earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
   const _earthR = _earthB ? _earthB.radius : 0.2564;
-  const _rs = bigRockets ? (_earthR / 8) : ((_earthR / 2e6) / 8);
+  // Missions force Earth-scale rendering so the user can see the spacecraft
+  // following its trajectory regardless of the global Big Rockets toggle.
+  const _rs = (bigRockets || r.isMission) ? (_earthR / 8) : ((_earthR / 2e6) / 8);
   ctx.save();
   ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
   ctx.translate(sx, sy);
@@ -4600,6 +4603,730 @@ function drawSingleRocket(r, t) {
 
 function drawRockets(t) {
   for (const r of rockets) drawSingleRocket(r, t);
+}
+
+// ---- Scripted missions (Artemis II free-return, Voyager grand tour, etc.) ----
+// Missions are parametric trajectories, not gravity-integrated. They follow
+// hand-tuned waypoints relative to Earth and the target bodies (which themselves
+// keep moving), play out in real-time over a per-mission duration so the warp
+// slider doesn't change pacing, and despawn on completion. The visual rocket
+// reuses drawSingleRocket and gets m.isMission = true so it always renders at
+// Earth scale (otherwise it's microscopic and you can't see it without Follow).
+const MISSION_DURATION_MS = 30000;
+
+// Transient on-canvas toast used by launchArtemisII when prerequisites fail.
+let _missionToastUntil = 0;
+let _missionToastText = '';
+
+const MISSION_PHASE_LABELS = {
+  'ascent':         'Ascent',
+  'trans-lunar':    'Trans-Lunar Coast',
+  'lunar-flyby':    'Lunar Flyby',
+  'trans-earth':    'Trans-Earth Coast',
+  'reentry':        'Re-entry & Splashdown',
+  'orbital':        'Earth Orbit (no Moon)',
+  'depart':         'Departing Solar System',
+  'apollo-ascent':  'Saturn V Ascent',
+  'apollo-tlc':     'Trans-Lunar Coast',
+  'apollo-loi':     'Lunar Orbit',
+  'apollo-descent': 'Eagle Descent',
+  'apollo-stay':    'On the Surface (Tranquility Base)',
+  'apollo-liftoff': 'Eagle Ascent & Rendezvous',
+  'apollo-tec':     'Trans-Earth Coast',
+  'apollo-reentry': 'Re-entry & Splashdown',
+  'hubble-ascent':  'STS-31 Ascent & Deploy',
+  'hubble-orbit':   'In LEO — Observing',
+  'iss-ascent':     'Ascent to Orbit',
+  'iss-orbit':      'Orbital Laboratory',
+  'jwst-ascent':    'Ariane 5 Ascent',
+  'jwst-transit':   'Cruise to Sun-Earth L2',
+  'jwst-l2':        'Halo Orbit at L2 — Observing',
+  'rover-ascent':   'Ascent to Orbit',
+  'rover-transit':  'Mars Transfer Coast',
+  'rover-descent':  'Entry, Descent & Landing',
+  'rover-roving':   'Roving the Martian Surface',
+  'complete':       'Mission Complete'
+};
+
+// Find Earth's moon. The sim tags moons with isMoon + rootPlanetName.
+function _findEarthMoon() {
+  return bodies.find(b => b.isMoon && (b.rootPlanetName || '').toLowerCase() === 'earth');
+}
+
+// Top-level dispatcher: pick the trajectory function for this mission's type.
+function _missionPositionAt(m, t) {
+  if (m.type === 'flyby')  return _flybyMissionPositionAt(m, t);
+  if (m.type === 'apollo') return _apolloPositionAt(m, t);
+  if (m.type === 'leo')    return _leoOrbiterPositionAt(m, t);
+  if (m.type === 'jwst')   return _jwstPositionAt(m, t);
+  if (m.type === 'rover')  return _marsRoverPositionAt(m, t);
+  return _freeReturnPositionAt(m, t);   // default: Artemis II free-return
+}
+
+// Artemis II free-return: Earth → Lunar flyby → Earth.
+function _freeReturnPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const moon = _findEarthMoon();
+  const eR = earth.radius;
+  const ld = m.launchDir;
+  const leoAlt = eR * 1.6;
+
+  if (!moon) {
+    if (t < 0.05) {
+      const k = t / 0.05;
+      const alt = eR + (leoAlt - eR) * k;
+      return { x: earth.x + ld[0] * alt, y: earth.y + ld[1] * alt, phase: 'ascent' };
+    }
+    if (t < 0.95) {
+      const k = (t - 0.05) / 0.90;
+      const arc = Math.sin(k * Math.PI);
+      const reach = leoAlt + eR * 60 * arc;
+      const ang = k * Math.PI * 2;
+      return {
+        x: earth.x + Math.cos(ang) * reach,
+        y: earth.y + Math.sin(ang) * reach,
+        phase: 'orbital'
+      };
+    }
+    const k = (t - 0.95) / 0.05;
+    const alt = leoAlt + (eR - leoAlt) * k;
+    return { x: earth.x + ld[0] * alt, y: earth.y + ld[1] * alt, phase: 'reentry' };
+  }
+
+  const mR = moon.radius;
+  const me_dx = earth.x - moon.x, me_dy = earth.y - moon.y;
+  const me_d = Math.hypot(me_dx, me_dy) || 1;
+  const me_ux = me_dx / me_d, me_uy = me_dy / me_d;
+  const approachR = Math.max(mR * 5, eR * 1.0);
+  const nearX = moon.x + me_ux * approachR;
+  const nearY = moon.y + me_uy * approachR;
+  const smooth = k => k * k * (3 - 2 * k);
+
+  if (t < 0.05) {
+    const k = t / 0.05;
+    const alt = eR + (leoAlt - eR) * k;
+    return { x: earth.x + ld[0] * alt, y: earth.y + ld[1] * alt, phase: 'ascent' };
+  } else if (t < 0.40) {
+    const k = smooth((t - 0.05) / 0.35);
+    const sx = earth.x + ld[0] * leoAlt;
+    const sy = earth.y + ld[1] * leoAlt;
+    return { x: sx + (nearX - sx) * k, y: sy + (nearY - sy) * k, phase: 'trans-lunar' };
+  } else if (t < 0.55) {
+    const k = (t - 0.40) / 0.15;
+    const startAng = Math.atan2(me_uy, me_ux);
+    const ang = startAng + k * Math.PI * 2;
+    const flybyR = approachR;
+    return {
+      x: moon.x + Math.cos(ang) * flybyR,
+      y: moon.y + Math.sin(ang) * flybyR,
+      phase: 'lunar-flyby'
+    };
+  } else if (t < 0.95) {
+    const k = smooth((t - 0.55) / 0.40);
+    const ex = earth.x - ld[0] * leoAlt;
+    const ey = earth.y - ld[1] * leoAlt;
+    return { x: nearX + (ex - nearX) * k, y: nearY + (ey - nearY) * k, phase: 'trans-earth' };
+  }
+  const k = (t - 0.95) / 0.05;
+  const alt = leoAlt + (eR - leoAlt) * k;
+  return { x: earth.x - ld[0] * alt, y: earth.y - ld[1] * alt, phase: 'reentry' };
+}
+
+// Voyager-style trajectory: Earth ascent → coast/flyby pairs for each waypoint
+// planet → depart into deep space. Each frame samples planet positions live so
+// the curve adapts as the planets keep orbiting.
+function _flybyMissionPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const ld = m.launchDir;
+  const eR = earth.radius;
+  const leoAlt = eR * 1.6;
+
+  // Resolve waypoint names → bodies (filter out anything that's been removed).
+  const targets = m.waypoints
+    .map(name => bodies.find(b => (b.name || '').toLowerCase() === name.toLowerCase()))
+    .filter(Boolean);
+  if (!targets.length) {
+    // No waypoints found — fly straight out from Earth.
+    const reach = eR + (eR * 300) * t;
+    return { x: earth.x + ld[0] * reach, y: earth.y + ld[1] * reach, phase: 'depart' };
+  }
+
+  const N = targets.length;
+  const ascentEnd = 0.03;
+  const departShare = 0.10;
+  const flybyShare = 0.04;
+  const coastShare = (1 - ascentEnd - departShare - flybyShare * N) / N;
+  const smooth = k => k * k * (3 - 2 * k);
+
+  // Helper: standoff radius for a flyby (scale with planet size, but never tiny)
+  const standoff = b => Math.max(b.radius * 8, eR * 4);
+
+  if (t < ascentEnd) {
+    const k = t / ascentEnd;
+    const alt = eR + (leoAlt - eR) * k;
+    return { x: earth.x + ld[0] * alt, y: earth.y + ld[1] * alt, phase: 'ascent' };
+  }
+
+  // Walk the phase ladder: for each target, a coast then a flyby loop.
+  // `prev` is where the spacecraft was at the start of the current coast — it
+  // moves to the previous flyby's exit point as we advance.
+  let cursor = ascentEnd;
+  let prev = { x: earth.x + ld[0] * leoAlt, y: earth.y + ld[1] * leoAlt };
+
+  for (let i = 0; i < N; i++) {
+    const tgt = targets[i];
+    const r = standoff(tgt);
+    // Approach point: on the line from previous position toward the target,
+    // offset by the standoff radius (so the rocket arrives at the planet's edge).
+    const dx = prev.x - tgt.x, dy = prev.y - tgt.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const apX = tgt.x + (dx / d) * r;
+    const apY = tgt.y + (dy / d) * r;
+    const apAng = Math.atan2(apY - tgt.y, apX - tgt.x);
+
+    const coastEnd = cursor + coastShare;
+    const flybyEnd = coastEnd + flybyShare;
+
+    if (t < coastEnd) {
+      const k = smooth((t - cursor) / coastShare);
+      return {
+        x: prev.x + (apX - prev.x) * k,
+        y: prev.y + (apY - prev.y) * k,
+        phase: `coast-${i}`,
+        targetName: tgt.name
+      };
+    }
+    if (t < flybyEnd) {
+      // Loop 3/4 of the way around the planet for the gravity-assist arc.
+      const k = (t - coastEnd) / flybyShare;
+      const ang = apAng - k * Math.PI * 1.5;
+      return {
+        x: tgt.x + Math.cos(ang) * r,
+        y: tgt.y + Math.sin(ang) * r,
+        phase: `flyby-${i}`,
+        targetName: tgt.name
+      };
+    }
+
+    // Advance prev to the exit point of this flyby for the next iteration.
+    const exitAng = apAng - Math.PI * 1.5;
+    prev = {
+      x: tgt.x + Math.cos(exitAng) * r,
+      y: tgt.y + Math.sin(exitAng) * r
+    };
+    cursor = flybyEnd;
+  }
+
+  // Depart: straight line outward from the last flyby exit along the tangent.
+  // Tangent direction = exit-radius angle + 90° (the spacecraft was moving CCW).
+  const lastTgt = targets[N - 1];
+  const r = standoff(lastTgt);
+  const dxp = prev.x - lastTgt.x, dyp = prev.y - lastTgt.y;
+  const radialAng = Math.atan2(dyp, dxp);
+  const departAng = radialAng + Math.PI / 2;
+  const k = (t - cursor) / departShare;
+  const reach = r * (1 + k * 25);
+  return {
+    x: lastTgt.x + Math.cos(radialAng) * reach + Math.cos(departAng) * (k * eR * 60),
+    y: lastTgt.y + Math.sin(radialAng) * reach + Math.sin(departAng) * (k * eR * 60),
+    phase: 'depart'
+  };
+}
+
+// Apollo 11 lunar landing: Saturn V ascent → TLI coast → lunar orbit insertion
+// → Eagle descent and surface stay → Eagle ascent and rendezvous → TEC →
+// splashdown. Needs an Earth + Moon; falls back to free-return without one.
+function _apolloPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const moon = _findEarthMoon();
+  if (!moon) return _freeReturnPositionAt(m, t);
+
+  const eR = earth.radius, mR = moon.radius;
+  const ld = m.launchDir;
+  const leoAlt = eR * 1.6;
+  const orbitR = Math.max(mR * 3, eR * 0.8);
+  const surfaceR = mR * 1.05;
+
+  // Direction Moon → Earth (used to pick the "near side" insertion point)
+  const me_dx = earth.x - moon.x, me_dy = earth.y - moon.y;
+  const me_d = Math.hypot(me_dx, me_dy) || 1;
+  const me_ux = me_dx / me_d, me_uy = me_dy / me_d;
+  const insertionX = moon.x + me_ux * orbitR;
+  const insertionY = moon.y + me_uy * orbitR;
+  const insertionAng = Math.atan2(me_uy, me_ux);
+  const smooth = k => k * k * (3 - 2 * k);
+
+  // Phase boundaries (fractions of total mission time)
+  const T_ASC      = 0.03;
+  const T_TLC      = 0.28;
+  const T_LOI      = 0.40;   // ~1.5 lunar orbits before landing
+  const T_DESCENT  = 0.45;   // 5% to set down
+  const T_STAY     = 0.58;   // sit on surface for ~13%
+  const T_LIFTOFF  = 0.68;   // ascend & catch up to CSM in orbit
+  const T_TEC      = 0.95;   // long coast home
+  // 1.00 = splashdown
+
+  if (t < T_ASC) {
+    const k = t / T_ASC;
+    const alt = eR + (leoAlt - eR) * k;
+    return { x: earth.x + ld[0] * alt, y: earth.y + ld[1] * alt, phase: 'apollo-ascent' };
+  }
+  if (t < T_TLC) {
+    const k = smooth((t - T_ASC) / (T_TLC - T_ASC));
+    const sx = earth.x + ld[0] * leoAlt, sy = earth.y + ld[1] * leoAlt;
+    return { x: sx + (insertionX - sx) * k, y: sy + (insertionY - sy) * k, phase: 'apollo-tlc' };
+  }
+  if (t < T_LOI) {
+    // 1.5 orbits of the Moon (parking orbit) before initiating descent
+    const k = (t - T_TLC) / (T_LOI - T_TLC);
+    const ang = insertionAng + k * Math.PI * 3;
+    return { x: moon.x + Math.cos(ang) * orbitR, y: moon.y + Math.sin(ang) * orbitR, phase: 'apollo-loi' };
+  }
+  // Landing direction stays fixed for descent, surface stay, and liftoff so
+  // the spacecraft visibly sits in one spot on the Moon.
+  const landingAng = insertionAng + Math.PI * 3;
+  if (t < T_DESCENT) {
+    // De-orbit burn → powered descent → touchdown
+    const k = (t - T_LOI) / (T_DESCENT - T_LOI);
+    const r = orbitR + (surfaceR - orbitR) * smooth(k);
+    return { x: moon.x + Math.cos(landingAng) * r, y: moon.y + Math.sin(landingAng) * r, phase: 'apollo-descent' };
+  }
+  if (t < T_STAY) {
+    // EVA / flag planting / Tranquility Base — locked to the surface.
+    // state='landed' switches off the rocket's exhaust plume in drawSingleRocket.
+    return {
+      x: moon.x + Math.cos(landingAng) * surfaceR,
+      y: moon.y + Math.sin(landingAng) * surfaceR,
+      phase: 'apollo-stay',
+      state: 'landed'
+    };
+  }
+  if (t < T_LIFTOFF) {
+    // LM ascent stage liftoff → rendezvous (climb back to orbit and continue
+    // partway around so it visibly meets the CSM)
+    const k = (t - T_STAY) / (T_LIFTOFF - T_STAY);
+    const ascentK = Math.min(1, k / 0.4);          // first 40% is the climb
+    const r = surfaceR + (orbitR - surfaceR) * smooth(ascentK);
+    const sweep = Math.max(0, (k - 0.4) / 0.6) * Math.PI;
+    const ang = landingAng + sweep;
+    return { x: moon.x + Math.cos(ang) * r, y: moon.y + Math.sin(ang) * r, phase: 'apollo-liftoff' };
+  }
+  if (t < T_TEC) {
+    // Trans-Earth Coast — interpolate from the rendezvous point back to LEO
+    // on the opposite side of Earth so the curve has a satisfying arc.
+    const k = smooth((t - T_LIFTOFF) / (T_TEC - T_LIFTOFF));
+    const startAng = landingAng + Math.PI;
+    const sx = moon.x + Math.cos(startAng) * orbitR;
+    const sy = moon.y + Math.sin(startAng) * orbitR;
+    const ex = earth.x - ld[0] * leoAlt;
+    const ey = earth.y - ld[1] * leoAlt;
+    return { x: sx + (ex - sx) * k, y: sy + (ey - sy) * k, phase: 'apollo-tec' };
+  }
+  // Re-entry & splashdown
+  const k = (t - T_TEC) / (1 - T_TEC);
+  const alt = leoAlt + (eR - leoAlt) * k;
+  return { x: earth.x - ld[0] * alt, y: earth.y - ld[1] * alt, phase: 'apollo-reentry' };
+}
+
+// LEO orbiter (Hubble, ISS, anything that ascends from Earth and circles it).
+// m._phasePrefix selects 'hubble'/'iss' phase labels; m._orbitRadius and
+// m._orbitPeriodMs let each mission tweak its altitude and orbital cadence.
+function _leoOrbiterPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const eR = earth.radius;
+  const ld = m.launchDir;
+  const elapsedMs = t * m.durationMs;
+  const prefix = m._phasePrefix || 'hubble';
+  const orbitR = m._orbitRadius || (eR * 2.2);
+  const ASCENT_MS = 3500;
+  const PERIOD_MS = m._orbitPeriodMs || 20000;
+
+  if (elapsedMs < ASCENT_MS) {
+    const k = elapsedMs / ASCENT_MS;
+    const r = eR + (orbitR - eR) * k;
+    return { x: earth.x + ld[0] * r, y: earth.y + ld[1] * r, phase: `${prefix}-ascent` };
+  }
+  // Circular orbit, starting at the launch angle and continuing forever.
+  const orbitTime = elapsedMs - ASCENT_MS;
+  const ang = m.launchAngle + (orbitTime / PERIOD_MS) * Math.PI * 2;
+  return {
+    x: earth.x + Math.cos(ang) * orbitR,
+    y: earth.y + Math.sin(ang) * orbitR,
+    phase: `${prefix}-orbit`
+  };
+}
+
+// JWST: Ariane 5 ascent → cruise to Sun-Earth L2 → small halo orbit at L2.
+// L2 sits on the anti-Sun side of Earth, ~1% of the Earth-Sun distance away.
+function _jwstPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const sun = bodies.find(b => b.isSun);
+  if (!sun) return null;
+  const eR = earth.radius;
+  const ld = m.launchDir;
+  const elapsedMs = t * m.durationMs;
+
+  // Compute the L2 point live so it tracks Earth as it orbits the Sun.
+  const se_dx = earth.x - sun.x, se_dy = earth.y - sun.y;
+  const se_d  = Math.hypot(se_dx, se_dy) || 1;
+  const se_ux = se_dx / se_d, se_uy = se_dy / se_d;
+  const l2Dist = se_d * 0.01;
+  const l2X = earth.x + se_ux * l2Dist;
+  const l2Y = earth.y + se_uy * l2Dist;
+
+  const ASCENT_MS = 2000;
+  const COAST_MS  = 12000;
+  const ARRIVAL   = ASCENT_MS + COAST_MS;
+  const HALO_MS   = 30000;
+  const haloR     = l2Dist * 0.4;
+  const leoAlt    = eR * 1.6;
+
+  if (elapsedMs < ASCENT_MS) {
+    const k = elapsedMs / ASCENT_MS;
+    const r = eR + (leoAlt - eR) * k;
+    return { x: earth.x + ld[0] * r, y: earth.y + ld[1] * r, phase: 'jwst-ascent' };
+  }
+  if (elapsedMs < ARRIVAL) {
+    const k = (elapsedMs - ASCENT_MS) / COAST_MS;
+    const smooth = k * k * (3 - 2 * k);
+    const sx = earth.x + ld[0] * leoAlt;
+    const sy = earth.y + ld[1] * leoAlt;
+    return { x: sx + (l2X - sx) * smooth, y: sy + (l2Y - sy) * smooth, phase: 'jwst-transit' };
+  }
+  // Halo orbit around the (moving) L2 point.
+  const haloTime = elapsedMs - ARRIVAL;
+  const ang = m.launchAngle + (haloTime / HALO_MS) * Math.PI * 2;
+  return {
+    x: l2X + Math.cos(ang) * haloR,
+    y: l2Y + Math.sin(ang) * haloR,
+    phase: 'jwst-l2'
+  };
+}
+
+// Mars rover (Spirit, Opportunity, Curiosity, etc.): ascent → cruise to Mars
+// → EDL (entry, descent, landing) → rove. After landing the rover sits on the
+// Martian surface (riding along as Mars orbits the Sun) with a tiny wobble so
+// you can see it moving in the close-zoom view.
+function _marsRoverPositionAt(m, t) {
+  const earth = findEarthBody();
+  if (!earth) return null;
+  const mars = bodies.find(b => (b.name || '').toLowerCase() === 'mars');
+  if (!mars) return null;
+  const eR = earth.radius, mR = mars.radius;
+  const ld = m.launchDir;
+  const elapsedMs = t * m.durationMs;
+  const leoAlt = eR * 1.6;
+
+  const ASCENT_MS  = 1500;
+  const COAST_MS   = 15000;
+  const DESCENT_MS = 1500;
+  const T1 = ASCENT_MS;
+  const T2 = T1 + COAST_MS;
+  const T3 = T2 + DESCENT_MS;
+
+  // m.launchAngle here is reused as the rover's *surface* longitude on Mars
+  // so each rover lands at its own spot. The actual launch direction is in m.launchDir.
+  const surfaceAng = m.launchAngle;
+  const surfaceR   = mR * 1.02;
+
+  if (elapsedMs < T1) {
+    const k = elapsedMs / T1;
+    const r = eR + (leoAlt - eR) * k;
+    return { x: earth.x + ld[0] * r, y: earth.y + ld[1] * r, phase: 'rover-ascent' };
+  }
+  if (elapsedMs < T2) {
+    // Hohmann-ish cruise toward an approach point above Mars's surface
+    const k = (elapsedMs - T1) / COAST_MS;
+    const smooth = k * k * (3 - 2 * k);
+    const sx = earth.x + ld[0] * leoAlt;
+    const sy = earth.y + ld[1] * leoAlt;
+    const approachR = mR * 6;
+    const apX = mars.x + Math.cos(surfaceAng) * approachR;
+    const apY = mars.y + Math.sin(surfaceAng) * approachR;
+    return { x: sx + (apX - sx) * smooth, y: sy + (apY - sy) * smooth, phase: 'rover-transit' };
+  }
+  if (elapsedMs < T3) {
+    // EDL: parachute + skycrane drop to the surface
+    const k = (elapsedMs - T2) / DESCENT_MS;
+    const r = mR * 6 + (surfaceR - mR * 6) * k;
+    return { x: mars.x + Math.cos(surfaceAng) * r, y: mars.y + Math.sin(surfaceAng) * r, phase: 'rover-descent' };
+  }
+  // Roving: stays attached to Mars's surface (Mars's orbital motion carries it),
+  // with a small back-and-forth wobble so it's visibly alive at high zoom.
+  const sinceLanding = elapsedMs - T3;
+  const wobble = Math.sin(sinceLanding / 8000) * 0.05;
+  const ang = surfaceAng + wobble;
+  return {
+    x: mars.x + Math.cos(ang) * surfaceR,
+    y: mars.y + Math.sin(ang) * surfaceR,
+    phase: 'rover-roving',
+    state: 'landed'      // hide the rocket exhaust while parked on Mars
+  };
+}
+
+function spawnApollo11Mission() {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  // Aim toward the Moon (or random if it's missing — fallback path handles it)
+  let ang = Math.random() * Math.PI * 2;
+  const moon = _findEarthMoon();
+  if (moon) ang = Math.atan2(moon.y - earth.y, moon.x - earth.x);
+  const ld = [Math.cos(ang), Math.sin(ang)];
+  missions.push({
+    isMission: true,
+    type: 'apollo',
+    name: 'Apollo 11',
+    startMs: performance.now(),
+    durationMs: 45000,
+    progress: 0, phase: 'apollo-ascent',
+    launchAngle: ang, launchDir: ld,
+    x: earth.x + ld[0] * earth.radius,
+    y: earth.y + ld[1] * earth.radius,
+    heading: ang,
+    state: 'launching',
+  });
+  return true;
+}
+
+// Spawn the Artemis II free-return mission. Needs an Earth in the scene
+// (a Moon is preferred — without one the rocket flies a fallback Earth loop).
+// Returns false if Earth isn't present.
+function spawnArtemisIIMission() {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  const ang = Math.random() * Math.PI * 2;
+  const ld = [Math.cos(ang), Math.sin(ang)];
+  missions.push({
+    isMission: true,
+    type: 'free-return',
+    name: 'Artemis II',
+    startMs: performance.now(),
+    durationMs: MISSION_DURATION_MS,
+    progress: 0, phase: 'ascent',
+    launchAngle: ang, launchDir: ld,
+    x: earth.x + ld[0] * earth.radius,
+    y: earth.y + ld[1] * earth.radius,
+    heading: ang,
+    state: 'launching',
+  });
+  return true;
+}
+
+// Generic multi-flyby mission spawner (used by Voyager 1 / Voyager 2). The
+// launch heading points toward the first waypoint so the rocket actually heads
+// out toward Jupiter on day one, instead of flailing in a random direction.
+function _spawnFlybyMission(opts) {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  // Resolve the first available waypoint to aim at; fall back to random.
+  let ang = Math.random() * Math.PI * 2;
+  for (const name of opts.waypoints) {
+    const tgt = bodies.find(b => (b.name || '').toLowerCase() === name.toLowerCase());
+    if (tgt) { ang = Math.atan2(tgt.y - earth.y, tgt.x - earth.x); break; }
+  }
+  const ld = [Math.cos(ang), Math.sin(ang)];
+  missions.push({
+    isMission: true,
+    type: 'flyby',
+    name: opts.name,
+    waypoints: opts.waypoints.slice(),
+    startMs: performance.now(),
+    durationMs: opts.durationMs,
+    progress: 0, phase: 'ascent',
+    launchAngle: ang, launchDir: ld,
+    x: earth.x + ld[0] * earth.radius,
+    y: earth.y + ld[1] * earth.radius,
+    heading: ang,
+    state: 'launching',
+  });
+  return true;
+}
+
+function spawnVoyager1Mission() {
+  return _spawnFlybyMission({
+    name: 'Voyager 1',
+    waypoints: ['Jupiter', 'Saturn'],
+    durationMs: 45000,
+  });
+}
+
+function spawnVoyager2Mission() {
+  return _spawnFlybyMission({
+    name: 'Voyager 2',
+    waypoints: ['Jupiter', 'Saturn', 'Uranus', 'Neptune'],
+    durationMs: 60000,
+  });
+}
+
+// Generic indefinite-mission helper. Used by Hubble, ISS, JWST, Mars rovers —
+// anything that ascends and then keeps doing its thing until you reset the sim.
+// `opts` controls type, name, phase prefix, orbit geometry, and launch heading.
+function _spawnIndefiniteMission(opts) {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  const ang = (typeof opts.launchAngle === 'function') ? opts.launchAngle(earth) : Math.random() * Math.PI * 2;
+  const ld = [Math.cos(ang), Math.sin(ang)];
+  missions.push({
+    isMission: true,
+    type: opts.type,
+    name: opts.name,
+    indefinite: true,
+    startMs: performance.now(),
+    durationMs: 3_600_000,     // 1h nominal; mission won't despawn anyway
+    progress: 0, phase: opts.initialPhase,
+    launchAngle: ang, launchDir: ld,
+    _phasePrefix: opts._phasePrefix,
+    _orbitRadius: opts._orbitRadius,
+    _orbitPeriodMs: opts._orbitPeriodMs,
+    x: earth.x + ld[0] * earth.radius,
+    y: earth.y + ld[1] * earth.radius,
+    heading: ang,
+    state: 'launching',
+  });
+  return true;
+}
+
+function spawnHubbleMission() {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  return _spawnIndefiniteMission({
+    type: 'leo', name: 'Hubble',
+    initialPhase: 'hubble-ascent', _phasePrefix: 'hubble',
+    _orbitRadius: earth.radius * 2.4,    // a bit higher than ISS
+    _orbitPeriodMs: 22000,
+  });
+}
+
+function spawnISSMission() {
+  const earth = findEarthBody();
+  if (!earth) return false;
+  return _spawnIndefiniteMission({
+    type: 'leo', name: 'ISS',
+    initialPhase: 'iss-ascent', _phasePrefix: 'iss',
+    _orbitRadius: earth.radius * 2.0,    // a hair below Hubble
+    _orbitPeriodMs: 18000,                // ~93 min in real life — visibly faster
+  });
+}
+
+function spawnJWSTMission() {
+  return _spawnIndefiniteMission({
+    type: 'jwst', name: 'JWST',
+    initialPhase: 'jwst-ascent',
+    // Launch heading aims toward L2 (anti-Sun direction)
+    launchAngle: (earth) => {
+      const sun = bodies.find(b => b.isSun);
+      if (!sun) return Math.random() * Math.PI * 2;
+      return Math.atan2(earth.y - sun.y, earth.x - sun.x);
+    }
+  });
+}
+
+function _spawnMarsRoverMission(name) {
+  return _spawnIndefiniteMission({
+    type: 'rover', name,
+    initialPhase: 'rover-ascent',
+    // We re-use launchAngle as the rover's surface longitude on Mars so each
+    // rover sits at a different spot. The cruise heading is computed from
+    // Earth → Mars in the trajectory function via launchDir; here we randomize.
+    launchAngle: () => Math.random() * Math.PI * 2,
+  });
+}
+function spawnSpiritMission()      { return _spawnMarsRoverMission('Spirit'); }
+function spawnOpportunityMission() { return _spawnMarsRoverMission('Opportunity'); }
+function spawnCuriosityMission()   { return _spawnMarsRoverMission('Curiosity'); }
+
+// Advance every active mission. Uses performance.now() so missions play out
+// over a fixed real-time duration independent of the warp slider.
+function updateMissions() {
+  const now = performance.now();
+  for (let i = missions.length - 1; i >= 0; i--) {
+    const m = missions[i];
+    // If Earth was removed mid-flight, abort the mission silently
+    if (!findEarthBody()) { missions.splice(i, 1); continue; }
+    const t = (now - m.startMs) / m.durationMs;
+    // Indefinite missions (orbiters, rovers) never auto-complete — they stay
+    // in their final phase until the user resets the sim or removes them.
+    if (!m.indefinite && t >= 1) {
+      m.phase = 'complete';
+      missions.splice(i, 1);
+      continue;
+    }
+    const pos = _missionPositionAt(m, t);
+    if (!pos) { missions.splice(i, 1); continue; }
+    // Heading = direction of motion (numeric tangent). dt is small enough that
+    // sampling the next position gives a clean velocity vector even at phase boundaries.
+    // For indefinite missions we sample a fixed 50ms ahead instead of clamping
+    // to 1, so the heading stays correct even after the elapsed time has grown
+    // beyond a full nominal duration.
+    const ahead = _missionPositionAt(m, m.indefinite ? t + 50 / m.durationMs : Math.min(1, t + 0.003));
+    if (ahead) {
+      const hdx = ahead.x - pos.x, hdy = ahead.y - pos.y;
+      if (hdx * hdx + hdy * hdy > 1e-12) m.heading = Math.atan2(hdy, hdx);
+    }
+    m.x = pos.x; m.y = pos.y;
+    m.progress = t;
+    m.phase = pos.phase;
+    if (pos.targetName) m._lastTargetName = pos.targetName;
+    // Some phases (e.g. Apollo 11 on the lunar surface) ask drawSingleRocket
+    // to hide the exhaust by reporting state='landed'. Default back to
+    // 'launching' so the flame returns once we're in flight again.
+    m.state = pos.state || 'launching';
+  }
+}
+
+function drawMissions(t) {
+  for (const m of missions) drawSingleRocket(m, t);
+}
+
+// Banner at the top of the canvas while a mission is active. One row per
+// in-flight mission so the user can track multiple simultaneous launches.
+function drawMissionBanner(t) {
+  const w = canvas.clientWidth;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.font = '700 16px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  // Duplicate-name suffixes ("Apollo 11 #2") so stacked launches of the same
+  // mission stay readable. Only added when there's actually more than one.
+  const nameCounts = {};
+  for (const m of missions) nameCounts[m.name] = (nameCounts[m.name] || 0) + 1;
+  const nameSeen = {};
+  let rowY = 42;
+  for (const m of missions) {
+    const pct = Math.floor(m.progress * 100);
+    let label = MISSION_PHASE_LABELS[m.phase] || m.phase;
+    if (m._lastTargetName) {
+      if (m.phase && m.phase.startsWith('coast-')) label = `Coast to ${m._lastTargetName}`;
+      else if (m.phase && m.phase.startsWith('flyby-')) label = `${m._lastTargetName} Flyby`;
+    }
+    nameSeen[m.name] = (nameSeen[m.name] || 0) + 1;
+    const suffix = nameCounts[m.name] > 1 ? ` #${nameSeen[m.name]}` : '';
+    // Indefinite missions (Hubble, ISS, JWST, rovers) don't have a meaningful
+    // % complete — they run until you reset.
+    const pctText = m.indefinite ? '' : ` (${pct}%)`;
+    const msg = `🚀 ${m.name}${suffix} — ${label}${pctText}`;
+    const alpha = 0.7 + 0.3 * Math.sin(t * 0.18);
+    const tw = ctx.measureText(msg).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(w / 2 - tw / 2 - 12, rowY, tw + 24, 24);
+    ctx.fillStyle = `rgba(125,211,252,${alpha})`;
+    ctx.fillText(msg, w / 2, rowY + 5);
+    rowY += 28;
+  }
+  // One-shot toast for prerequisite failures (e.g. "no Earth in the scene").
+  if (performance.now() < _missionToastUntil && _missionToastText) {
+    const tw = ctx.measureText(_missionToastText).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(w / 2 - tw / 2 - 12, rowY + 6, tw + 24, 28);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillText(_missionToastText, w / 2, rowY + 11);
+  }
+  ctx.restore();
 }
 
 // ---- Martian UFOs / alien invasions ----
@@ -7256,6 +7983,7 @@ function loop(t) {
     updateMTypeStars();
     updateKSuperGiantStars();
     updateRockets(speedMul);
+    updateMissions();
     updateUfos(speedMul);
     // Periodic 10% chance of a Martian invasion. Rolled on a fixed REAL-time
     // cadence (not warp-scaled, so fast-forward doesn't spam them), and only
@@ -7277,19 +8005,14 @@ function loop(t) {
   // Camera lock takes priority over auto-follow: re-center on the locked body
   // every frame so it appears stationary and central, with everything else
   // moving relative to it.
-  if (followRocket && rockets.length) {
-    // Follow-rocket takes top priority: keep the (first) rocket centred AND ease
-    // the zoom in until the rocket fills ~80% of the screen (it's microscopic, so
-    // this needs an enormous zoom). Auto-releases when no rockets are left.
-    const rk = rockets[0];
+  if (followRocket && (rockets.length || missions.length)) {
+    // Lock the camera onto the (first) rocket/mission but leave viewZoom alone,
+    // so the user is free to zoom in or out with the wheel while still being
+    // pinned to the spacecraft. Auto-releases when nothing's left to follow.
+    const rk = rockets[0] || missions[0];
     viewX = rk.x;
     viewY = rk.y;
-    const earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
-    const earthR = earthB ? earthB.radius : 0.2564;
-    const rocketLen = (bigRockets ? (earthR / 8) : ((earthR / 2e6) / 8)) * 16;
-    const targetZoom = 0.8 * Math.min(w, h) / rocketLen;
-    viewZoom += (targetZoom - viewZoom) * 0.15;        // smooth zoom-in to ~80%
-  } else if (followRocket && !rockets.length) {
+  } else if (followRocket && !rockets.length && !missions.length) {
     followRocket = false;    // nothing left to follow
   } else if (watchAliens && ufos.length) {
     // Camera tracks the LEADING visible UFO (closest to Earth) so it's always
@@ -7458,6 +8181,13 @@ function loop(t) {
       drawSingleRocket(r, animTime);
       ctx.restore();
     }
+    // Scripted missions (Artemis II etc.) render the same way as rockets.
+    for (const m of missions) {
+      ctx.save();
+      applyEntity3DTransform(m.x, m.y, m.z || 0);
+      drawSingleRocket(m, animTime);
+      ctx.restore();
+    }
 
     // Merge effects in screen space
     drawMergeEffects3D();
@@ -7546,9 +8276,11 @@ function loop(t) {
     }
 
     drawRockets(animTime);
+    drawMissions(animTime);
     drawUfos(animTime);
     drawMergeEffects();
     drawInvasionBanner(animTime);
+    drawMissionBanner(animTime);
 
     const drawSelRing = (b, color) => {
       ctx.save();
@@ -9017,6 +9749,122 @@ function toggleBigNeutronStars() {
   bigNeutronStars = !bigNeutronStars;
   const btn = document.getElementById('btn-big-ns');
   if (btn) btn.classList.toggle('active', bigNeutronStars);
+}
+
+// UI wrapper for the Artemis II mission button. Surfaces a brief on-canvas
+// toast when the launch can't proceed (no Earth in the scene).
+function launchArtemisII() {
+  if (!findEarthBody()) {
+    _missionToastUntil = performance.now() + 3500;
+    _missionToastText = '🌍 Add an Earth (rename any planet to "Earth") to launch Artemis II.';
+    return;
+  }
+  // Missions stack — clicking the button again launches another spacecraft on
+  // its own trajectory alongside any already in flight (including other types).
+  spawnArtemisIIMission();
+  _autoFollowMission();
+}
+
+// Apollo 11 lunar landing. Needs Earth, ideally with the Moon — without the
+// Moon we fall back to a free-return Earth loop and warn the user.
+function launchApollo11() {
+  if (!findEarthBody()) {
+    _missionToastUntil = performance.now() + 3500;
+    _missionToastText = '🌍 Add an Earth (rename any planet to "Earth") to launch Apollo 11.';
+    return;
+  }
+  if (!_findEarthMoon()) {
+    _missionToastUntil = performance.now() + 4000;
+    _missionToastText = '🌑 Apollo 11 needs Earth\'s Moon. Add a moon to Earth first.';
+    return;
+  }
+  // Missions stack — you can have multiple Apollo 11s and Artemis IIs flying
+  // simultaneously, each running its own clock and trajectory.
+  spawnApollo11Mission();
+  _autoFollowMission();
+}
+
+// Indefinite-mission UI handlers. None of these are destructive — they just
+// add a new spacecraft on its own clock. Stackable like Apollo / Artemis.
+function launchHubble() {
+  if (!_requireEarthForMission('Hubble')) return;
+  spawnHubbleMission();
+  _autoFollowMission();
+}
+function launchISS() {
+  if (!_requireEarthForMission('the ISS')) return;
+  spawnISSMission();
+  _autoFollowMission();
+}
+function launchJWST() {
+  if (!_requireEarthForMission('JWST')) return;
+  if (!bodies.find(b => b.isSun)) {
+    _missionToastUntil = performance.now() + 4000;
+    _missionToastText = '☀️ JWST needs the Sun in the scene to locate Sun-Earth L2.';
+    return;
+  }
+  spawnJWSTMission();
+  _autoFollowMission();
+}
+function launchSpirit()      { _launchMarsRover('Spirit',      spawnSpiritMission); }
+function launchOpportunity() { _launchMarsRover('Opportunity', spawnOpportunityMission); }
+function launchCuriosity()   { _launchMarsRover('Curiosity',   spawnCuriosityMission); }
+function _launchMarsRover(name, spawnFn) {
+  if (!_requireEarthForMission(name)) return;
+  if (!bodies.find(b => (b.name || '').toLowerCase() === 'mars')) {
+    _missionToastUntil = performance.now() + 4000;
+    _missionToastText = `🔴 ${name} needs Mars in the scene. Rename a planet to "Mars" first.`;
+    return;
+  }
+  spawnFn();
+  _autoFollowMission();
+}
+function _requireEarthForMission(name) {
+  if (findEarthBody()) return true;
+  _missionToastUntil = performance.now() + 3500;
+  _missionToastText = `🌍 Add an Earth (rename any planet to "Earth") to launch ${name}.`;
+  return false;
+}
+
+// Voyager 1 / 2 need a canonical solar system to fly through (Jupiter, Saturn,
+// optionally Uranus and Neptune). We blow away the current sim and respawn
+// the default bodies so the trajectory makes sense — that's destructive, so
+// confirm with the user first.
+function launchVoyager1() {
+  _launchVoyager('Voyager 1', spawnVoyager1Mission, 'Jupiter and Saturn');
+}
+function launchVoyager2() {
+  _launchVoyager('Voyager 2', spawnVoyager2Mission, 'Jupiter, Saturn, Uranus, and Neptune');
+}
+function _launchVoyager(name, spawnFn, route) {
+  const ok = confirm(
+    `⚠ ${name} will RESET your simulation to the canonical solar system\n` +
+    `(Sun + Mercury–Pluto) so the spacecraft can fly past ${route}.\n\n` +
+    `This destroys any bodies, galaxies, rockets, or admin spawns you\n` +
+    `currently have. Save first if you want to keep them.\n\n` +
+    `Launch ${name}?`
+  );
+  if (!ok) return;
+  // Wipe the scene back to the default solar system. resetSim also clears
+  // rockets/galaxies/effects/simTime and recreates the default bodies.
+  missions.length = 0;
+  ufos.length = 0;
+  resetSim();
+  // resetSim triggers a recenter — give the layout one frame to settle, then
+  // spawn so the new mission picks up the canonical planet positions.
+  setTimeout(() => {
+    spawnFn();
+    _autoFollowMission();
+  }, 50);
+}
+
+// Auto-engage Follow Rocket so the user can actually see the spacecraft.
+function _autoFollowMission() {
+  if (!followRocket) {
+    followRocket = true;
+    const btn = document.getElementById('btn-follow-rocket');
+    if (btn) btn.classList.add('active');
+  }
 }
 
 // Show a picker modal listing every other body; clicking one runs setOrbit.
