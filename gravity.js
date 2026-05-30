@@ -628,8 +628,8 @@ function isRoxsLike(planet) {
   return name === 'roxs 42bb';
 }
 
-// Naming a planet "HD 100546b" makes it 7× Jupiter's nominal radius,
-// matching that real protoplanet's measured size.
+// Naming a planet "HD 100546b" makes it 3.4× Jupiter's nominal radius,
+// matching the real protoplanet's measured size.
 function isHD100546bLike(planet) {
   if (!planet || planet.isSun) return false;
   const name = (planet.name || '').trim().toLowerCase();
@@ -643,7 +643,7 @@ function isHD100546bLike(planet) {
 // module load, so the constant is fully resolved.)
 function planetDisplayRadius(b) {
   if (isRoxsLike(b))      return JUPITER_RADIUS * 2.5;
-  if (isHD100546bLike(b)) return JUPITER_RADIUS * 7;
+  if (isHD100546bLike(b)) return JUPITER_RADIUS * 3.4;
   return b.radius;
 }
 
@@ -692,11 +692,11 @@ const J1407B_COLORS = [
 ];
 
 function drawJ1407bRings(b, backHalf) {
-  const scale = 200;
-  // Inner edge pushed well out from the planet so the rings can never
-  // overlap the planet's body. Also leaves a clean dark central gap.
-  const innerR = b.radius * 5 * scale;
-  const outerR = b.radius * 28 * scale;
+  const scale = 40000;
+  // 200× larger than the previous 200× Saturn pass (so 40 000× Saturn's real
+  // 1.24 R → 2.27 R ring extent).
+  const innerR = b.radius * 1.24 * scale;
+  const outerR = b.radius * 2.27 * scale;
   const tilt = 0.22;
   ctx.save();
   for (let i = 0; i < J1407B_BANDS.length; i++) {
@@ -716,6 +716,65 @@ function drawJ1407bRings(b, backHalf) {
       backHalf ? 2 * Math.PI : Math.PI);
     ctx.stroke();
   }
+  ctx.restore();
+}
+
+// Realistic J1407b — the artist's-impression-style massive ring disc: many
+// fine concentric bands, cream-bright at the centre fading to brown/black at
+// the edge, steep tilt, no visible planet body. Used in realistic mode.
+function drawRealisticJ1407b(b) {
+  const scale = 40000;
+  // 200× larger than the previous 200× Saturn pass (so 40 000× Saturn's real
+  // 1.24 R → 2.27 R ring extent).
+  const innerR = b.radius * 1.24 * scale;
+  const outerR = b.radius * 2.27 * scale;
+  const tilt = 0.27;
+  const NUM_BANDS = 90;
+  ctx.save();
+  for (let i = 0; i < NUM_BANDS; i++) {
+    const tNorm = i / (NUM_BANDS - 1);
+    const rMid = innerR + (outerR - innerR) * tNorm;
+    const ry = rMid * tilt;
+    // Deterministic pseudo-randoms keyed off i — bands stay put frame to frame.
+    const r1 = Math.abs(Math.sin(i * 7.13 + 0.3));    // skip / alpha
+    const r2 = Math.abs(Math.sin(i * 11.7 + 2.1));    // line width
+    const r3 = Math.abs(Math.sin(i * 5.3  + 4.7));    // brightness jitter
+    if (r1 < 0.12) continue;                          // ~12% of bands are gaps
+    const baseW = (outerR - innerR) / NUM_BANDS;
+    const lineW = baseW * (0.22 + r2 * 1.10);
+    // Cream → tan → brown → near-black, with per-band brightness jitter so
+    // adjacent rings contrast like the reference. Centre brightest, outer
+    // dimmest.
+    const baseBright = 1 - tNorm * 0.62;              // 1.0 at centre, 0.38 at edge
+    const jitter = (r3 - 0.5) * 0.85;                 // ±0.42
+    const bright = Math.max(0.05, Math.min(1, baseBright + jitter));
+    const R = Math.round(232 * bright);
+    const G = Math.round(198 * bright);
+    const B = Math.round(160 * bright);
+    const alpha = 0.55 + r1 * 0.40;
+    ctx.strokeStyle = `rgba(${R},${G},${B},${alpha})`;
+    // Cap stroke at 0.8 × ry so a wide band doesn't sweep across the disc
+    // through the central area.
+    ctx.lineWidth = Math.max(0.5, Math.min(lineW, ry * 0.8));
+    ctx.beginPath();
+    ctx.ellipse(b.x, b.y, rMid, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // The central Jupiter-style planet body — sized to sit inside the inner
+  // ring with a comfortable margin so the rings clearly orbit it.
+  const visR = outerR * 0.03;
+  ctx.save();
+  ctx.shadowColor = '#d9bc92';
+  ctx.shadowBlur = visR * 0.6;
+  const bodyG = ctx.createRadialGradient(b.x - visR * 0.3, b.y - visR * 0.3, 0, b.x, b.y, visR);
+  bodyG.addColorStop(0,    '#f0d8a8');
+  bodyG.addColorStop(0.55, '#caa987');
+  bodyG.addColorStop(1,    '#6b4528');
+  ctx.fillStyle = bodyG;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, visR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
   ctx.restore();
 }
 
@@ -767,14 +826,14 @@ function drawPlutoHeart(b, cx = b.x, cy = b.y) {
 // Nominal Jupiter render radius in this sim: mass 15 → 3 + ∛15·2.2 ≈ 8.43.
 const JUPITER_RADIUS = 3 + Math.cbrt(15) * 2.2;
 
-// Betelgeuse animation: a sun named "Betelgeuse" is a Red Super Giant that
-// exponentially grows from its natural radius up to a visible disc 700,000×
-// the sun's nominal size, over BETELGEUSE_GROW_SEC seconds of sim time.
-// The red-super-giant rendering multiplies the disc by (1 + rgFactor·2.5)·10
-// = 35 at full expansion, so b.radius itself only needs to reach ~20,000×
-// for the visible disc to hit 700,000×.
+// Betelgeuse — real values: 19.4 M☉ red supergiant whose photosphere extends
+// to ~5.2 AU (Jupiter's orbit). A sun named "Betelgeuse" exponentially grows
+// from its natural radius to that visible disc over BETELGEUSE_GROW_SEC. The
+// RSG rendering multiplies b.radius by (1+rgFactor·2.5)·10 = 35 at full
+// expansion, so b.radius itself is capped at TARGET_AU × _AU_SIM_UNITS / 35.
 const BETELGEUSE_GROW_SEC = 15;
-const BETELGEUSE_MAX_MUL = 20000;
+const BETELGEUSE_MASS = 19400;        // 19.4 M☉
+const BETELGEUSE_TARGET_AU = 5.2;     // Jupiter's orbit
 
 function isBetelgeuseLike(sun) {
   if (!sun || !sun.isSun) return false;
@@ -782,9 +841,11 @@ function isBetelgeuseLike(sun) {
   return name === 'betelgeuse';
 }
 
-// A sun named "Rigel" is locked to a 80× nominal-sun radius and cyan color.
-// Zooming in on it has a 10 % chance to blind the viewer for 10 real seconds.
-const RIGEL_SIZE_MUL = 80;
+// Rigel — real values: 21 M☉ blue supergiant. Photosphere capped at roughly
+// half of Mercury's orbit (≈ 0.19 AU). drawRealisticRigel multiplies b.radius
+// by 30, so cap b.radius at TARGET_AU × _AU_SIM_UNITS / 30.
+const RIGEL_MASS = 21000;             // 21 M☉
+const RIGEL_TARGET_AU = 0.5 * 0.387;  // halfway to Mercury's orbit (≈ 0.194 AU)
 const RIGEL_COLOR = '#4dd4ff';
 
 function isRigelLike(sun) {
@@ -796,8 +857,9 @@ function isRigelLike(sun) {
 function updateRigelStars() {
   for (const b of bodies) {
     if (!isRigelLike(b)) continue;
-    const baseRadius = 28 + Math.cbrt(b.mass / 1000) * 4;
-    b.radius = baseRadius * RIGEL_SIZE_MUL;
+    // Final visible radius = half Mercury's orbit; the disc renderer multiplies
+    // b.radius by 30, so cap b.radius here at TARGET_AU × _AU_SIM_UNITS / 30.
+    b.radius = (RIGEL_TARGET_AU * _AU_SIM_UNITS) / 30;
     b.color = RIGEL_COLOR;
     // Lock the body into the Blue Super Giant phase. Resetting phaseAtSim
     // every frame keeps the 180-s BSG collapse timer from ever triggering,
@@ -808,8 +870,14 @@ function updateRigelStars() {
 }
 
 // Naming a star "2MASS J0523-1403" shrinks it to 8.6 % of a normal sun's
-// nominal radius — matching the real ultracool dwarf, the smallest known star.
-const SMALLSTAR_SIZE_MUL = 0.086;
+// nominal radius — matching the real ultracool L-dwarf, the smallest known star.
+// Real mass ~0.067 M☉ → 70 sim units; surface ~2074 K → deep red.
+const SMALL_STAR_MASS = 70;
+// Visual radius locked to "a touch bigger than Saturn" (Saturn ≈ 4.45 sim
+// units from its planet-formula radius). Real 2MASS J0523-1403 is ~0.086 R☉
+// ≈ Saturn-sized; we bump it slightly so it's recognisable in the panel.
+const SMALLSTAR_RADIUS = 5;
+const SMALLSTAR_COLOR = '#b04220';   // dim red
 function is2MASSJ05231403Like(sun) {
   if (!sun || !sun.isSun) return false;
   const name = (sun.name || '').trim().toLowerCase();
@@ -818,8 +886,10 @@ function is2MASSJ05231403Like(sun) {
 function updateSmallStars() {
   for (const b of bodies) {
     if (!is2MASSJ05231403Like(b)) continue;
-    const baseRadius = 28 + Math.cbrt(b.mass / 1000) * 4;
-    b.radius = baseRadius * SMALLSTAR_SIZE_MUL;
+    b.radius = SMALLSTAR_RADIUS;
+    b.color = SMALLSTAR_COLOR;
+    b.stellarPhase = 'main-sequence';
+    b.phaseAtSim = simTime;
   }
 }
 
@@ -1037,6 +1107,11 @@ function drawBlindOverlay() {
 }
 
 const BETELGEUSE_COLOR = '#d94032';
+// Pixel-exact override: drop a "betelgeuse.png" (or rename your image to that)
+// next to this app to render Betelgeuse from that exact picture. Loaded
+// same-origin (no crossOrigin). When absent, Betelgeuse is drawn procedurally
+// (granulated orange photosphere + prominences + bright limb).
+const BETELGEUSE_IMG_LOCAL = 'betelgeuse.png';
 
 function updateBetelgeuseRadii() {
   // Defensive: don't advance Betelgeuse state when time is stopped, even
@@ -1053,9 +1128,13 @@ function updateBetelgeuseRadii() {
     b.redGiantAtSim = simTime - 10000;
     const elapsed = (simTime - b.betelgeuseStartSim) / 1000;
     const t = Math.min(elapsed / BETELGEUSE_GROW_SEC, 1);
-    // Exponential growth: mul goes 1 → BETELGEUSE_MAX_MUL over the duration
-    const mul = Math.pow(BETELGEUSE_MAX_MUL, t);
     const baseRadius = 28 + Math.cbrt(b.mass / 1000) * 4;
+    // Cap the final b.radius so the rendered disc (b.radius × 35) reaches
+    // exactly BETELGEUSE_TARGET_AU. Computed dynamically from _AU_SIM_UNITS so
+    // an admin AU rescale still lands the star at Jupiter's orbit.
+    const targetRadius = (BETELGEUSE_TARGET_AU * _AU_SIM_UNITS) / 35;
+    const maxMul = Math.max(1, targetRadius / baseRadius);
+    const mul = Math.pow(maxMul, t);
     b.radius = baseRadius * mul;
     b.color = BETELGEUSE_COLOR;
   }
@@ -1129,21 +1208,21 @@ const MOON_TEX_URLS = {
   ganymede: N3 + 'jupiterGanymede.jpg',
   callisto: N3 + 'jupiterCallisto.jpg'
 };
-// Phobos, Deimos and Charon use their real NASA globe photos (their shape —
-// irregular potatoes for Phobos/Deimos, round for Charon — shows naturally
-// because the photo's black margins blend into the black sky), spun by rotating
-// the image. This is the original look; Charon keeps its reddish "Mordor" pole.
+// Phobos, Deimos, Charon, Triton use their real NASA globe photos (Voyager 2 /
+// MRO etc). Irregular potatoes for Phobos/Deimos show their shape naturally
+// because the photo's black margins blend into the black sky; round moons
+// (Charon, Triton) just read as discs. Spun by rotating the image.
 const MOON_PHOTO = {
   phobos: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Phobos_colour_2008.jpg/1280px-Phobos_colour_2008.jpg',
   deimos: 'https://upload.wikimedia.org/wikipedia/commons/8/8d/Deimos-MRO.jpg',
-  charon: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Charon_in_Enhanced_Color.jpg/1280px-Charon_in_Enhanced_Color.jpg'
+  charon: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Charon_in_Enhanced_Color.jpg/1280px-Charon_in_Enhanced_Color.jpg',
+  triton: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a6/Triton_moon_mosaic_Voyager_2_%28large%29.jpg/1280px-Triton_moon_mosaic_Voyager_2_%28large%29.jpg'
 };
-// Hazy/smooth moons with no usable cratered map: a plain shaded globe in the
-// right colour. Titan is a featureless orange haze ball in visible light (this
-// is accurate); Triton is pinkish-tan. [core, mid, limb] colours.
+// Titan has no usable surface map (thick orange haze blocks visible light) so
+// it's drawn as a featureless smooth gradient — pale yellow-gold → warm orange
+// → dusky blue-tinted limb, matching the iconic Cassini visible-light photo.
 const MOON_SMOOTH = {
-  titan:  ['#e8bc66', '#c88a3c', '#7c4f1e'],
-  triton: ['#dcc8b6', '#b89a86', '#6c5648']
+  titan: ['#f5d27a', '#dca64b', '#4a4658']
 };
 
 // Real galaxy photos (Wikimedia, CORS), drawn additively over the black sky:
@@ -1343,8 +1422,15 @@ function _venusAddCraters(c, W, H) {
 // rotation. drawBody skips the canvas spin transform for these (the scroll
 // handles spin) to avoid float jitter at high zoom.
 function usesScrolledTexture(b) {
-  if (!realisticMode) return false;
   const n = (b.name || '').toLowerCase();
+  if (n === 'betelgeuse' || n === 'rigel' || n === '2mass j0523-1403') return true;  // bespoke renders, mode-independent
+  // Black holes / evaporating BHs are drawn with a fixed-orientation accretion
+  // disc; the per-body canvas spin would otherwise swing the whole disc each
+  // frame (the disc's own streak animation is the only motion we want).
+  if (b.isSun && (b.stellarPhase === 'black-hole' || b.stellarPhase === 'evaporating')) return true;
+  // Neutron stars use a screen-space bespoke render — skip the wasted spin wrap.
+  if (b.isSun && (b.stellarPhase === 'neutron-star' || b.stellarPhase === 'dormant-neutron-star')) return true;
+  if (!realisticMode) return false;
   if (MOON_TEX_URLS[n] || MOON_PHOTO[n] || MOON_SMOOTH[n]) return true;  // famous moons
   return n === 'earth' || n === 'moon' || n === 'mercury' || n === 'venus' || n === 'mars' ||
          n === 'sun' || n === 'jupiter' || n === 'saturn' || n === 'uranus' ||
@@ -1835,6 +1921,153 @@ function drawPhotoMoon(b, r, url) {
 
 // A smooth shaded globe in a given [core, mid, limb] palette — for hazy/smooth
 // moons with no cratered map (Titan's orange haze, Triton's pinkish ice).
+// Shared helper: load a cylindrical map, blacken-→-transparent its black
+// margins, then smear each column to fill unmapped regions with the nearest
+// photographed colour. Cached per URL. Used for Triton (whose Voyager-2 map
+// is incomplete at the north) and Charon (whose New Horizons map is
+// incomplete at the south).
+const _processedMapCache = {};
+const _processedMapFailed = {};
+function _getProcessedCylindricalMap(url) {
+  if (_processedMapCache[url]) return _processedMapCache[url];
+  if (_processedMapFailed[url]) return null;
+  const img = loadTex(url);
+  if (!_texReady(img)) return null;
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const cnv = document.createElement('canvas');
+  cnv.width = w; cnv.height = h;
+  const cx = cnv.getContext('2d');
+  cx.drawImage(img, 0, 0);
+  try {
+    const data = cx.getImageData(0, 0, w, h);
+    const d = data.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const lum = (d[i] + d[i+1] + d[i+2]) / 3;
+      if (lum < 24) d[i+3] = 0;
+    }
+    // Only sufficiently bright pixels SEED the smear — keeps the dark
+    // edge-bleed at the photographed boundary from streaking dark colours
+    // across the unmapped hemisphere.
+    const SEED_MIN_LUM = 75;
+    for (let x = 0; x < w; x++) {
+      let lR = 0, lG = 0, lB = 0, lA = 0;
+      for (let y = 0; y < h; y++) {
+        const i = (y * w + x) * 4;
+        if (d[i+3] > 0) {
+          const lum = (d[i] + d[i+1] + d[i+2]) / 3;
+          if (lum >= SEED_MIN_LUM) { lR = d[i]; lG = d[i+1]; lB = d[i+2]; lA = d[i+3]; }
+        } else if (lA > 0) { d[i] = lR; d[i+1] = lG; d[i+2] = lB; d[i+3] = lA; }
+      }
+      lA = 0;
+      for (let y = h - 1; y >= 0; y--) {
+        const i = (y * w + x) * 4;
+        if (d[i+3] > 0) {
+          const lum = (d[i] + d[i+1] + d[i+2]) / 3;
+          if (lum >= SEED_MIN_LUM) { lR = d[i]; lG = d[i+1]; lB = d[i+2]; lA = d[i+3]; }
+        } else if (lA > 0) { d[i] = lR; d[i+1] = lG; d[i+2] = lB; d[i+3] = lA; }
+      }
+    }
+    cx.putImageData(data, 0, 0);
+    _processedMapCache[url] = cnv;
+    return cnv;
+  } catch (e) {
+    _processedMapFailed[url] = true;
+    return null;
+  }
+}
+
+// Bespoke Charon render — wraps the New-Horizons cylindrical map onto a
+// rotating sphere so the surface texture scrolls naturally as Charon spins
+// (instead of the flat 2D-disc spin drawPhotoMoon does). The map's unmapped
+// southern hemisphere is filled by the shared column-smear processor.
+const CHARON_TEX_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/39/Charon_map_iau1803c.jpg/1280px-Charon_map_iau1803c.jpg';
+function drawRealisticCharon(b, r) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  // Base grey-with-Mordor-tint gradient — fills any unmapped pixels so the disc
+  // always reads as a complete sphere.
+  const g = ctx.createRadialGradient(p.sx - sr * 0.3, p.sy - sr * 0.3, 0, p.sx, p.sy, sr);
+  g.addColorStop(0,    '#c8c0b8');
+  g.addColorStop(0.55, '#9a8e84');
+  g.addColorStop(1,    '#4a3e38');
+  ctx.fillStyle = g;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  const tex = _getProcessedCylindricalMap(CHARON_TEX_URL);
+  if (tex) drawScrolledGlobeAt(tex, p.sx, p.sy, sr, b.spin || 0, 0);
+  ctx.restore();
+}
+
+// Bespoke Triton render — wraps the real USGS Voyager-2 cylindrical (2:1
+// equirectangular) map onto a rotating sphere via drawScrolledGlobeAt. Black
+// pixels in the map (unmapped north pole + photo gaps + sky margin) are made
+// transparent in a one-time processing pass so the underlying pinkish-icy
+// base gradient shows through, completing the disc.
+const TRITON_TEX_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/61/Triton_map_no_grid.jpg/1280px-Triton_map_no_grid.jpg';
+function drawRealisticTriton(b, r) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  // Base pinkish-icy gradient — fills the unphotographed hemisphere with
+  // Triton-toned colours so the disc always reads as a complete sphere.
+  const g = ctx.createRadialGradient(p.sx - sr * 0.3, p.sy - sr * 0.3, 0, p.sx, p.sy, sr);
+  g.addColorStop(0,    '#e8dcd2');
+  g.addColorStop(0.55, '#c8b0a6');
+  g.addColorStop(1,    '#604a4a');
+  ctx.fillStyle = g;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  // Real cylindrical Triton map wrapped onto the sphere (drawScrolledGlobeAt
+  // does the cylindrical x→longitude mapping with seamless seam wrap). The
+  // processed canvas has its black pixels turned transparent so the base
+  // gradient shows through anywhere Voyager didn't photograph.
+  const processed = _getProcessedCylindricalMap(TRITON_TEX_URL);
+  if (processed) {
+    drawScrolledGlobeAt(processed, p.sx, p.sy, sr, b.spin || 0, 0);
+  }
+  ctx.restore();
+}
+
+// Bespoke Titan render — clean uniform pale yellow-orange globe with a very
+// subtle smooth fade to a warm dark limb. Skips _applyDayNightScreen (the
+// reference Cassini photo is uniformly illuminated, the strong night-side
+// terminator was crushing the disc to dark blue/black).
+function drawRealisticTitan(b, r) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  // Centred radial gradient (not offset) so the disc reads as uniformly
+  // illuminated like the Cassini visible-light photo. Pale gold core fading
+  // smoothly to a dark warm brown limb — no blue rim, no harsh shadow.
+  const g = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, sr);
+  g.addColorStop(0,    '#f6d683');
+  g.addColorStop(0.55, '#e0a84a');
+  g.addColorStop(0.85, '#7a4e1a');
+  g.addColorStop(1,    '#1c0e04');
+  ctx.fillStyle = g;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+  // Subtle outer haze just past the disc edge — Titan's atmosphere reads as
+  // a faint warm halo against space, drawn outside the clip.
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  const h = ctx.createRadialGradient(p.sx, p.sy, sr * 0.97, p.sx, p.sy, sr * 1.10);
+  h.addColorStop(0,   'rgba(230,170,90,0.18)');
+  h.addColorStop(1,   'rgba(160,100,40,0)');
+  ctx.fillStyle = h;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.10, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
 function drawSmoothMoon(b, r, cols) {
   const p = bodyScreenPos(b);
   const sr = r * p.scale;
@@ -1874,6 +2107,133 @@ function drawRealisticJupiter(b, r) {
   ctx.fill();
   ctx.restore();
   _limbShade(b, r);
+}
+
+// ROXs 42Bb — uses Jupiter's REAL cylindrical photo map as the base (gives
+// genuine atmospheric banding/turbulence for free) tinted red with a multiply
+// overlay, then layers a prominent target-style polar cap and a big dark
+// cyclone storm. Screen-space coords (no high-zoom shake), matches the
+// banded-red-gas-giant artist-impression reference.
+function drawRealisticRoxs42Bb(b, r) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Soft warm atmospheric glow OUTSIDE the disc (drawn before the clip so it
+  // bleeds past the limb). Gives the planet a hot-young-protoplanet aura.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const aura = ctx.createRadialGradient(p.sx, p.sy, sr * 0.95, p.sx, p.sy, sr * 1.30);
+  aura.addColorStop(0,    'rgba(220,90,40,0.32)');
+  aura.addColorStop(0.5,  'rgba(170,55,25,0.16)');
+  aura.addColorStop(1,    'rgba(110,30,15,0)');
+  ctx.fillStyle = aura;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.30, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // Clip to disc for everything else.
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+
+  // Real Jupiter map wrapped on a sphere — gives turbulent banding, swirls,
+  // and storm-like detail no procedural approach can match. We shift the
+  // longitude by π so Jupiter's identifiable Great Red Spot is hidden on the
+  // far side of the sphere.
+  const tex = loadTex(JUPITER_TEX_URL);
+  if (_texReady(tex)) {
+    drawScrolledGlobeAt(tex, p.sx, p.sy, sr, (b.spin || 0) + Math.PI, 0);
+    // Multiply tint shifts Jupiter's cream/orange to ROXs's deep red-orange
+    // while preserving all the photographic banding contrast.
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = '#cc4824';
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+    // Saturation/vividness boost — additive warm glow that lifts mid-tones
+    // back up after the multiply has darkened everything.
+    ctx.globalCompositeOperation = 'overlay';
+    const vivid = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, sr);
+    vivid.addColorStop(0,   'rgba(255,130,60,0.35)');
+    vivid.addColorStop(0.7, 'rgba(220,80,30,0.20)');
+    vivid.addColorStop(1,   'rgba(80,20,10,0)');
+    ctx.fillStyle = vivid;
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+    ctx.globalCompositeOperation = 'source-over';
+  } else {
+    const baseG = ctx.createRadialGradient(p.sx - sr * 0.25, p.sy - sr * 0.20, 0, p.sx, p.sy, sr * 1.1);
+    baseG.addColorStop(0,   '#c0683a');
+    baseG.addColorStop(0.7, '#7a3020');
+    baseG.addColorStop(1,   '#3a1408');
+    ctx.fillStyle = baseG;
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  }
+
+  // North polar cap — soft warm halo only (per user — bright red core dot
+  // removed for a cleaner look).
+  const polarY = p.sy - sr * 0.58;
+  const polarR = sr * 0.30;
+  const halo = ctx.createRadialGradient(p.sx, polarY, 0, p.sx, polarY, polarR * 1.7);
+  halo.addColorStop(0,   'rgba(250,120,60,0.65)');
+  halo.addColorStop(0.5, 'rgba(210,80,35,0.40)');
+  halo.addColorStop(1,   'rgba(120,40,20,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.ellipse(p.sx, polarY, polarR * 1.7, polarR * 1.7 * 0.55, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Sphere read — limb darkening for a clear 3D ball shape.
+  _limbShadeScreen(p.sx, p.sy, sr);
+  ctx.restore();
+}
+
+// HD 100546b — pale cream-yellow gas giant. Uses Jupiter's real cylindrical
+// photo as the base (gives proper banding) with only a very subtle cream
+// overlay so the natural Jupiter palette comes through. No polar cap or
+// cyclone — the reference is a smooth banded ball.
+function drawRealisticHd100546b(b, r) {
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Warm cream atmospheric glow outside the disc.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const aura = ctx.createRadialGradient(p.sx, p.sy, sr * 0.95, p.sx, p.sy, sr * 1.25);
+  aura.addColorStop(0,   'rgba(240,210,140,0.25)');
+  aura.addColorStop(0.5, 'rgba(200,170,100,0.12)');
+  aura.addColorStop(1,   'rgba(120,90,50,0)');
+  ctx.fillStyle = aura;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.25, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // Clip to disc.
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+
+  // Real Jupiter cylindrical map → sphere. Spin offset by π so the GRS hides
+  // on the far hemisphere (HD 100546b shouldn't have an obvious Great Red Spot).
+  const tex = loadTex(JUPITER_TEX_URL);
+  if (_texReady(tex)) {
+    drawScrolledGlobeAt(tex, p.sx, p.sy, sr, (b.spin || 0) + Math.PI, 0);
+    // Strong cream brightening via `screen` — pushes the Jupiter palette up to
+    // HD 100546b's much paler, more uniform yellow-cream look.
+    ctx.globalCompositeOperation = 'screen';
+    ctx.fillStyle = 'rgba(255,225,160,0.65)';
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+    ctx.globalCompositeOperation = 'source-over';
+  } else {
+    // Texture still loading — cream gradient fallback.
+    const baseG = ctx.createRadialGradient(p.sx - sr * 0.25, p.sy - sr * 0.20, 0, p.sx, p.sy, sr * 1.1);
+    baseG.addColorStop(0,   '#f0d8a0');
+    baseG.addColorStop(0.7, '#b08850');
+    baseG.addColorStop(1,   '#5a4020');
+    ctx.fillStyle = baseG;
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  }
+
+  // Sphere read — limb darkening.
+  _limbShadeScreen(p.sx, p.sy, sr);
+  ctx.restore();
 }
 
 function drawRealisticSaturn(b, r) {
@@ -2118,6 +2478,205 @@ function getSunTextureCanvas() {
   return cnv;
 }
 
+// Spectral colour at this mass, as an [R,G,B] array (no hex conversion).
+function getSpectralRGB(mass) {
+  const s = SPECTRAL_COLOR_STOPS;
+  if (mass <= s[0][0]) return s[0][1].slice();
+  if (mass >= s[s.length - 1][0]) return s[s.length - 1][1].slice();
+  for (let i = 0; i < s.length - 1; i++) {
+    const m0 = s[i][0], m1 = s[i + 1][0];
+    if (mass >= m0 && mass <= m1) {
+      const t = (mass - m0) / (m1 - m0);
+      const c0 = s[i][1], c1 = s[i + 1][1];
+      return [
+        Math.round(c0[0] + (c1[0] - c0[0]) * t),
+        Math.round(c0[1] + (c1[1] - c0[1]) * t),
+        Math.round(c0[2] + (c1[2] - c0[2]) * t)
+      ];
+    }
+  }
+  return s[0][1].slice();
+}
+
+// 4-stop granulation colour ramp for a star of the given mass: deep lane → mid
+// → spectral → bright peak. The peak just brightens the spectral colour toward
+// white by a fixed amount — naturally keeps cool stars amber and hot stars
+// white-blue without special cases.
+function _starColorRamp(mass) {
+  const sp = getSpectralRGB(mass);
+  const R = sp[0], G = sp[1], B = sp[2];
+  return {
+    dark:   [Math.round(R * 0.30), Math.round(G * 0.22), Math.round(B * 0.28)],
+    mid1:   [Math.round(R * 0.65), Math.round(G * 0.52), Math.round(B * 0.52)],
+    mid2:   [R, G, B],
+    bright: [Math.min(255, R + 55), Math.min(255, G + 55), Math.min(255, B + 55)]
+  };
+}
+
+// Procedural granulation map for a star of the given mass. Cached per coarse
+// log-mass bucket so stars sharing a spectral type share a texture (≤ ~12
+// buckets cover M → O). Same noise topology as getSunTextureCanvas.
+const _starTexCache = {};
+function getStarTextureCanvas(mass) {
+  const key = Math.round(Math.log10(Math.max(80, mass)) * 4);
+  if (_starTexCache[key]) return _starTexCache[key];
+  const ramp = _starColorRamp(mass);
+  const S = 512;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const n1 = _makeValueNoise3D(11 + key);
+  const n2 = _makeValueNoise3D(29 + key * 5);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 6; k++) {
+        const f = 2.5 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.5);
+        total += amp; amp *= 0.55; freq *= 2;
+      }
+      let n = v / total;
+      const warp = (n2(cx0 * 4, sx0 * 4, yN * 10) - 0.5) * 0.5;
+      n = Math.max(0, Math.min(1, n + warp));
+      let r, g, b;
+      if (n < 0.30) {
+        const u = n / 0.30;
+        r = lerp(ramp.dark[0], ramp.mid1[0], u);
+        g = lerp(ramp.dark[1], ramp.mid1[1], u);
+        b = lerp(ramp.dark[2], ramp.mid1[2], u);
+      } else if (n < 0.62) {
+        const u = (n - 0.30) / 0.32;
+        r = lerp(ramp.mid1[0], ramp.mid2[0], u);
+        g = lerp(ramp.mid1[1], ramp.mid2[1], u);
+        b = lerp(ramp.mid1[2], ramp.mid2[2], u);
+      } else if (n < 0.85) {
+        const u = (n - 0.62) / 0.23;
+        r = lerp(ramp.mid2[0], ramp.bright[0], u);
+        g = lerp(ramp.mid2[1], ramp.bright[1], u);
+        b = lerp(ramp.mid2[2], ramp.bright[2], u);
+      } else {
+        const u = (n - 0.85) / 0.15;
+        r = lerp(ramp.bright[0], Math.min(255, ramp.bright[0] + 15), u);
+        g = lerp(ramp.bright[1], Math.min(255, ramp.bright[1] + 15), u);
+        b = lerp(ramp.bright[2], Math.min(255, ramp.bright[2] + 15), u);
+      }
+      const i = (y * S + x) * 4;
+      data[i] = r; data[i+1] = g; data[i+2] = b; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _starTexCache[key] = cnv;
+  return cnv;
+}
+
+// Generalised realistic-Sun render — works for any main-sequence star, using
+// the mass-based granulation texture above and a spectral-tinted limb glow.
+// drawRealisticSun (below) becomes a thin wrapper for backwards compatibility.
+function drawRealisticStar(b, t) {
+  const r = b.radius;
+  const spin = b.spin || 0;
+  const tex = getStarTextureCanvas(b.mass);
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(tex, p.sx, p.sy, sr, spin, axialTiltRad(b));
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.55, p.sx, p.sy, sr);
+  dg.addColorStop(0, 'rgba(0,0,0,0)');
+  dg.addColorStop(1, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+  // Spectral-tinted outer halo — hot stars get a cool-blue glow, cool stars a
+  // warm orange one, automatically.
+  const sp = getSpectralRGB(b.mass);
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  const lg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.97, p.sx, p.sy, sr * 1.22);
+  lg.addColorStop(0, `rgba(${sp[0]},${sp[1]},${sp[2]},0.55)`);
+  lg.addColorStop(1, `rgba(${sp[0]},${sp[1]},${sp[2]},0)`);
+  ctx.fillStyle = lg;
+  ctx.beginPath();
+  ctx.arc(p.sx, p.sy, sr * 1.22, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Realistic supergiant render — same procedural plasma texture the realistic
+// Sun uses (granulated fBm photosphere), tinted to the phase's colour via a
+// `color` composite (preserves the sun's luminance/contrast but shifts hue).
+// Adds a broad outer halo and limb darkening. Used for unnamed BSG / RSG /
+// regular RG / K-super-giant phases in realistic mode. Betelgeuse and Rigel
+// have their own bespoke renderers above.
+function drawRealisticSupergiant(b, t) {
+  const phase = getSunPhase(b);
+  let discR, tintColor, haloIn, haloMid, haloOut;
+  if (phase === 'blue-super-giant') {
+    discR     = b.radius * 30;
+    tintColor = '#3a7aff';
+    haloIn    = 'rgba(120,170,255,0.55)';
+    haloMid   = 'rgba(60,110,255,0.22)';
+    haloOut   = 'rgba(15,40,180,0)';
+  } else if (phase === 'red-giant') {
+    const rgFactor = getRedGiantFactor(b);
+    const superMul = b.redSuperGiant ? 10 : 1;
+    discR     = b.radius * (1 + rgFactor * 2.5) * superMul;
+    tintColor = '#d83018';
+    haloIn    = 'rgba(255,95,30,0.60)';
+    haloMid   = 'rgba(220,60,20,0.22)';
+    haloOut   = 'rgba(140,30,10,0)';
+  } else if (phase === 'k-super-giant') {
+    discR     = b.radius;
+    tintColor = '#ff9a45';
+    haloIn    = 'rgba(255,150,60,0.55)';
+    haloMid   = 'rgba(220,110,40,0.22)';
+    haloOut   = 'rgba(160,70,20,0)';
+  } else {
+    return;
+  }
+  const p = bodyScreenPos(b);
+  const sr = discR * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+  // Broad outer halo (drawn first, outside the clip so it bleeds past the disc).
+  ctx.globalCompositeOperation = 'lighter';
+  const haloR = sr * 1.55;
+  const halo = ctx.createRadialGradient(p.sx, p.sy, sr * 0.95, p.sx, p.sy, haloR);
+  halo.addColorStop(0,    haloIn);
+  halo.addColorStop(0.55, haloMid);
+  halo.addColorStop(1,    haloOut);
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, haloR, 0, Math.PI * 2); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+  // Clip to disc and paint the Sun's procedural plasma texture wrapped on the
+  // sphere — same granulation as a realistic-mode Sun.
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(getSunTextureCanvas(), p.sx, p.sy, sr, b.spin || 0, 0);
+  // Hue-shift with `color` composite — keeps the sun's brightness/contrast,
+  // changes only the hue/saturation. (Falls back to `multiply` if unsupported.)
+  ctx.globalCompositeOperation = 'color';
+  ctx.fillStyle = tintColor;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.globalCompositeOperation = 'source-over';
+  // Limb darkening — soft rim shadow so the disc reads spherical.
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.55, p.sx, p.sy, sr);
+  dg.addColorStop(0, 'rgba(0,0,0,0)');
+  dg.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+}
+
 function drawRealisticSun(b, t) {
   // Procedural plasma sun. Rotates like Earth: the cylinder-sampled fBm texture
   // is SCROLLED horizontally by spin (a turning globe) instead of being rigidly
@@ -2151,6 +2710,573 @@ function drawRealisticSun(b, t) {
   ctx.beginPath();
   ctx.arc(p.sx, p.sy, sr * 1.22, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+}
+
+// Procedural red-supergiant surface texture (equirectangular, wraps in x like
+// the sun map). Bright amber-orange granulation with darker red lanes — tuned
+// warmer/redder than the Sun and never going white, to match the reference art.
+let _betelTexCanvas = null;
+function getBetelgeuseTextureCanvas() {
+  if (_betelTexCanvas) return _betelTexCanvas;
+  const S = 512;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const n1 = _makeValueNoise3D(41);
+  const n2 = _makeValueNoise3D(83);
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 6; k++) {
+        const f = 2.8 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.6);
+        total += amp; amp *= 0.55; freq *= 2;
+      }
+      let n = v / total;
+      const warp = (n2(cx0 * 4, sx0 * 4, yN * 10) - 0.5) * 0.45;
+      n = Math.max(0, Math.min(1, n + warp));
+      let R, G, B;
+      if (n < 0.30)      { const u = n / 0.30;          R = 95  + u * 110; G = 12 + u * 40;  B = 4 + u * 5; }    // deep red lanes
+      else if (n < 0.58) { const u = (n - 0.30) / 0.28; R = 205 + u * 50;  G = 52 + u * 78;  B = 9 + u * 18; }   // red-orange
+      else if (n < 0.82) { const u = (n - 0.58) / 0.24; R = 255;           G = 130 + u * 70; B = 27 + u * 40; }  // orange
+      else               { const u = (n - 0.82) / 0.18; R = 255;           G = 200 + u * 50; B = 67 + u * 110; } // bright amber-gold peaks
+      const i = (y * S + x) * 4;
+      data[i] = R; data[i+1] = G; data[i+2] = B; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _betelTexCanvas = cnv;
+  return cnv;
+}
+
+// Procedural blue-supergiant surface texture for Rigel. Same noise topology as
+// the Sun/Betelgeuse maps; ramp tuned to deep-navy lanes → mid-blue → bright
+// cyan → cyan-white peaks to match the reference art.
+let _rigelTexCanvas = null;
+function getRigelTextureCanvas() {
+  if (_rigelTexCanvas) return _rigelTexCanvas;
+  const S = 512;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const n1 = _makeValueNoise3D(67);
+  const n2 = _makeValueNoise3D(131);
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 6; k++) {
+        const f = 2.7 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.5);
+        total += amp; amp *= 0.55; freq *= 2;
+      }
+      let n = v / total;
+      const warp = (n2(cx0 * 4, sx0 * 4, yN * 10) - 0.5) * 0.45;
+      n = Math.max(0, Math.min(1, n + warp));
+      let R, G, B;
+      if (n < 0.32)      { const u = n / 0.32;        R = 15  + u * 45;  G = 40  + u * 65;  B = 110 + u * 60; }  // deep navy lanes
+      else if (n < 0.60) { const u = (n-0.32) / 0.28; R = 60  + u * 50;  G = 105 + u * 75;  B = 170 + u * 55; }  // mid blue
+      else if (n < 0.82) { const u = (n-0.60) / 0.22; R = 110 + u * 110; G = 180 + u * 70;  B = 225 + u * 25; }  // bright blue → cyan
+      else               { const u = (n-0.82) / 0.18; R = 220 + u * 35;  G = 250 + u * 5;   B = 250 + u * 5; }   // cyan-white peaks
+      const i = (y * S + x) * 4;
+      data[i] = R; data[i+1] = G; data[i+2] = B; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _rigelTexCanvas = cnv;
+  return cnv;
+}
+
+// Bespoke Rigel render: granulated blue photosphere + bright cyan-white limb
+// ring + broad cyan halo. Drawn at the same disc size the BSG cartoon path
+// would use (b.radius × 30) with the matching 6% pulsation. Replaces the
+// generic BSG corona/disc draw for any star named "Rigel".
+function drawRealisticRigel(b, t) {
+  // No pulsation — Rigel renders at a steady size.
+  const r = b.radius * 30;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Broad cyan-blue outer halo — Rigel is intensely luminous.
+  ctx.globalCompositeOperation = 'lighter';
+  const halo = ctx.createRadialGradient(p.sx, p.sy, sr * 0.95, p.sx, p.sy, sr * 1.6);
+  halo.addColorStop(0,   'rgba(150,225,255,0.55)');
+  halo.addColorStop(0.5, 'rgba(80,170,255,0.22)');
+  halo.addColorStop(1,   'rgba(40,110,220,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.6, 0, Math.PI * 2); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Granulated photosphere, clipped to the disc.
+  if (!paused) b._rigelT = (b._rigelT || 0) + 1;
+  const tt = b._rigelT || 0;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(getRigelTextureCanvas(), p.sx, p.sy, sr, tt * 0.0006, 0);
+  // Gentle inward shadow so the centre reads slightly deeper, leaving the
+  // limb the brightest part of the disc (matching the reference).
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.55, p.sx, p.sy, sr * 0.95);
+  dg.addColorStop(0, 'rgba(0,0,0,0)');
+  dg.addColorStop(1, 'rgba(0,15,55,0.20)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+
+  // Signature bright cyan-white limb ring.
+  ctx.globalCompositeOperation = 'lighter';
+  const ring = ctx.createRadialGradient(p.sx, p.sy, sr * 0.88, p.sx, p.sy, sr * 1.04);
+  ring.addColorStop(0,    'rgba(200,240,255,0)');
+  ring.addColorStop(0.78, 'rgba(200,240,255,0)');
+  ring.addColorStop(0.93, 'rgba(240,253,255,0.85)');
+  ring.addColorStop(0.98, 'rgba(255,255,255,0.95)');
+  ring.addColorStop(1,    'rgba(190,230,255,0)');
+  ctx.fillStyle = ring;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.04, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+// Procedural deep-red surface for 2MASS J0523-1403 (ultracool L-dwarf, ~2074 K).
+// Ramp is heavily compressed toward red: very deep maroon lanes, dim red mid,
+// muted orange-red peaks (cool stars don't get bright highlights).
+let _smallStarTexCanvas = null;
+function getSmallStarTextureCanvas() {
+  if (_smallStarTexCanvas) return _smallStarTexCanvas;
+  const S = 256;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const n1 = _makeValueNoise3D(53);
+  const n2 = _makeValueNoise3D(97);
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 5; k++) {
+        const f = 2.6 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.5);
+        total += amp; amp *= 0.55; freq *= 2;
+      }
+      let n = v / total;
+      const warp = (n2(cx0 * 4, sx0 * 4, yN * 10) - 0.5) * 0.40;
+      n = Math.max(0, Math.min(1, n + warp));
+      let R, G, B;
+      if (n < 0.35)      { const u = n / 0.35;        R = 38  + u * 62;  G = 7  + u * 23;  B = 3  + u * 5; }    // very deep maroon
+      else if (n < 0.65) { const u = (n-0.35) / 0.30; R = 100 + u * 68;  G = 30 + u * 35;  B = 8  + u * 10; }   // dark red
+      else if (n < 0.88) { const u = (n-0.65) / 0.23; R = 168 + u * 50;  G = 65 + u * 35;  B = 18 + u * 12; }   // dim red
+      else               { const u = (n-0.88) / 0.12; R = 218 + u * 22;  G = 100 + u * 18; B = 30 + u * 14; }   // muted orange-red peaks
+      const i = (y * S + x) * 4;
+      data[i] = R; data[i+1] = G; data[i+2] = B; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _smallStarTexCanvas = cnv;
+  return cnv;
+}
+
+// Bespoke 2MASS J0523-1403 render: tiny granulated deep-red disc + subtle dim
+// halo + strong limb darkening. Cool dwarfs don't get a bright limb ring like
+// hot supergiants do — they fade off softly.
+function drawRealistic2MASS(b, t) {
+  const r = b.radius;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Dim deep-red halo — modest, the star is very faint.
+  ctx.globalCompositeOperation = 'lighter';
+  const halo = ctx.createRadialGradient(p.sx, p.sy, sr * 0.95, p.sx, p.sy, sr * 1.4);
+  halo.addColorStop(0,   'rgba(165,35,8,0.40)');
+  halo.addColorStop(0.5, 'rgba(110,18,3,0.16)');
+  halo.addColorStop(1,   'rgba(60,5,0,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Granulated deep-red photosphere clipped to disc, slow drift.
+  if (!paused) b._smallT = (b._smallT || 0) + 1;
+  const tt = b._smallT || 0;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(getSmallStarTextureCanvas(), p.sx, p.sy, sr, tt * 0.0006, 0);
+  // Bright orange-yellow hot region off-centre (lower-left), matching the
+  // signature glowing patch in the reference art. Additive so it lifts the
+  // local brightness without flattening the granulation.
+  ctx.globalCompositeOperation = 'lighter';
+  const hx = p.sx - sr * 0.22, hy = p.sy + sr * 0.28;
+  const hotR = sr * 0.65;
+  const hot = ctx.createRadialGradient(hx, hy, 0, hx, hy, hotR);
+  hot.addColorStop(0,    'rgba(255,225,140,0.72)');
+  hot.addColorStop(0.35, 'rgba(255,160,70,0.45)');
+  hot.addColorStop(0.7,  'rgba(220,80,25,0.18)');
+  hot.addColorStop(1,    'rgba(150,30,5,0)');
+  ctx.fillStyle = hot;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.globalCompositeOperation = 'source-over';
+  // Strong inward limb darkening — cool dwarfs limb-darken sharply, edges go
+  // nearly black so the disc reads as a faintly glowing ember.
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.35, p.sx, p.sy, sr);
+  dg.addColorStop(0,    'rgba(0,0,0,0)');
+  dg.addColorStop(0.65, 'rgba(35,5,0,0.22)');
+  dg.addColorStop(1,    'rgba(10,1,0,0.65)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+
+  ctx.restore();
+}
+
+// Neutron-star palettes — same body+jets render, different colour:
+//  • normal   = blue-white pulsar
+//  • magnetar = magenta-white magnetar
+//  • strange  = green-white strange-matter NS
+// `tex` is the 4-stop ramp (low → high) sampled by the surface noise; the
+// other strings are "R,G,B" tuples used for halo / jet / limb gradient stops.
+const NS_PALETTES = {
+  normal: {
+    tex:     [[50,95,165],[115,150,205],[180,205,235],[240,250,253]],
+    jet:     '180,225,255', jetHot: '245,252,255',
+    halo:    '170,220,255', haloMid: '80,150,255', haloOut: '30,80,200',
+    rim:     '245,253,255', shadow: '0,20,55'
+  },
+  magnetar: {
+    tex:     [[95,25,135],[160,75,200],[220,155,235],[252,228,252]],
+    jet:     '230,175,250', jetHot: '255,230,255',
+    halo:    '230,170,250', haloMid: '170,80,225', haloOut: '90,25,160',
+    rim:     '255,228,255', shadow: '40,5,55'
+  },
+  strange: {
+    tex:     [[25,110,55],[80,180,90],[150,230,150],[235,255,235]],
+    jet:     '170,250,180', jetHot: '240,255,240',
+    halo:    '170,250,190', haloMid: '80,205,95',  haloOut: '25,140,50',
+    rim:     '240,255,240', shadow: '5,40,15'
+  }
+};
+
+// Procedural neutron-star surface texture for a given palette: scaly photosphere
+// with the palette's 4-stop ramp. Cached per palette key.
+const _NS_TEX_CACHE = {};
+function getNeutronStarTextureCanvas(paletteKey) {
+  if (_NS_TEX_CACHE[paletteKey]) return _NS_TEX_CACHE[paletteKey];
+  const stops = NS_PALETTES[paletteKey].tex;
+  const s0 = stops[0], s1 = stops[1], s2 = stops[2], s3 = stops[3];
+  const S = 512;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = S;
+  const cx = cnv.getContext('2d');
+  const seedShift = paletteKey.charCodeAt(0);
+  const n1 = _makeValueNoise3D(149 + seedShift);
+  const n2 = _makeValueNoise3D(211 + seedShift * 3);
+  const img = cx.createImageData(S, S);
+  const data = img.data;
+  for (let y = 0; y < S; y++) {
+    const yN = y / S;
+    for (let x = 0; x < S; x++) {
+      const theta = (x / S) * Math.PI * 2;
+      const cx0 = Math.cos(theta), sx0 = Math.sin(theta);
+      let v = 0, amp = 1, freq = 1, total = 0;
+      for (let k = 0; k < 6; k++) {
+        const f = 3.4 * freq;
+        v += amp * n1(cx0 * f, sx0 * f, yN * f * 2.6);
+        total += amp; amp *= 0.55; freq *= 2;
+      }
+      let n = v / total;
+      const warp = (n2(cx0 * 5, sx0 * 5, yN * 12) - 0.5) * 0.55;
+      n = Math.max(0, Math.min(1, n + warp));
+      let R, G, B;
+      if (n < 0.28)      { const u = n / 0.28;        R = s0[0] + u * (s1[0]-s0[0]); G = s0[1] + u * (s1[1]-s0[1]); B = s0[2] + u * (s1[2]-s0[2]); }
+      else if (n < 0.55) { const u = (n-0.28) / 0.27; R = s1[0] + u * (s2[0]-s1[0]); G = s1[1] + u * (s2[1]-s1[1]); B = s1[2] + u * (s2[2]-s1[2]); }
+      else if (n < 0.82) { const u = (n-0.55) / 0.27; R = s2[0] + u * (s3[0]-s2[0]); G = s2[1] + u * (s3[1]-s2[1]); B = s2[2] + u * (s3[2]-s2[2]); }
+      else               { const u = (n-0.82) / 0.18; R = s3[0] + u * (255-s3[0]);   G = s3[1] + u * (255-s3[1]);   B = s3[2] + u * (255-s3[2]); }
+      const i = (y * S + x) * 4;
+      data[i] = R; data[i+1] = G; data[i+2] = B; data[i+3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  _NS_TEX_CACHE[paletteKey] = cnv;
+  return cnv;
+}
+
+// Bespoke neutron-star render: textured body, twin polar jets that sweep on a
+// tilted magnetic axis, broad halo, no flares / field-line ellipses. Shared
+// across all three variants (normal pulsar, magnetar, strange-matter NS) —
+// only the colour palette changes. Dormant neutron stars get the body + halo
+// only; their jets have shut off.
+function drawNeutronStarBody(b, t) {
+  // Real neutron stars are ~10–20 km — about Houston-sized, ~300× smaller than
+  // Earth. Default render is at that real proportion (use the 💫 Big NS toggle
+  // for an easier-to-see half-Earth version).
+  const _earthB = bodies.find(x => (x.name || '').toLowerCase() === 'earth');
+  const _earthR = _earthB ? _earthB.radius : 0.2564;
+  const r = bigNeutronStars ? (_earthR * 0.5) : (_earthR / 300);
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  // The body itself can be sub-pixel (Houston-scale at solar-system zoom),
+  // but the 2 AU beams are AU-scale and stay visible even then — so don't
+  // early-return based on sr. Instead skip just the body-related draws.
+  const bodyVisible = sr >= 0.4;
+  const dormant = b.stellarPhase === 'dormant-neutron-star';
+  const paletteKey = b.magnetar ? 'magnetar' : (b.strangeMatter ? 'strange' : 'normal');
+  const pal = NS_PALETTES[paletteKey];
+
+  // Magnetic-axis tilt from the spin axis. Larger than the non-realistic
+  // 14° (≈0.25 rad) — at the user's previous "more tilted" request.
+  const TILT = 0.6;
+  // Spin rate (rad/ms of animTime). Matches the non-realistic pulsar's
+  // 700 RPM (700 · 2π / 60 000 ≈ 0.0733 rad/ms ≈ 11.7 rev/sec).
+  const NS_SPIN_RATE = 700 * 2 * Math.PI / 60000;
+  const nsSpin = t * NS_SPIN_RATE;
+  const sinTilt = Math.sin(TILT), cosTilt = Math.cos(TILT);
+  const cosTheta = Math.cos(nsSpin), sinTheta = Math.sin(nsSpin);
+  // 2D-projected angle of the magnetic axis (measured from vertical) and the
+  // foreshortening factor for the beam length as the axis tips toward / away
+  // from the viewer. Same math as the non-realistic pulsar.
+  const beamAngle = Math.atan2(sinTilt * cosTheta, cosTilt);
+  const lenFactor = Math.sqrt(cosTilt * cosTilt + sinTilt * sinTilt * cosTheta * cosTheta);
+  // Beam brightness pulses — the cone tip lights up when it swings toward
+  // the viewer (+Z); each beam has its own phase.
+  const topZ = Math.max(0, sinTheta), botZ = Math.max(0, -sinTheta);
+  const topFlash = 0.35 + 0.65 * topZ * topZ;
+  const botFlash = 0.35 + 0.65 * botZ * botZ;
+
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Twin polar jets — sweep through a cone as the star spins (projected angle
+  // + foreshortening + per-end pulse-flash). Drawn first so the body covers
+  // the bases. Hidden on dormant neutron stars.
+  if (!dormant) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(p.sx, p.sy);
+    ctx.rotate(beamAngle);
+    // Beams extend a fixed 2 AU regardless of body size, with foreshortening
+    // as the axis tilts toward/away from the viewer. Cone shape — narrow at
+    // the body, widening out to the tip.
+    const fullBeamLen = 2 * _AU_SIM_UNITS * p.scale * lenFactor;
+    const _bW = Math.max(sr * 0.45, 0.6);
+    const baseHalfW = _bW * 0.15;          // narrow at the body
+    const tipHalfW  = _bW * 8.0;           // much wider at the tip — flares outward
+    // Top cone — gradient fades from bright at the body to transparent at the tip.
+    const topG = ctx.createLinearGradient(0, -fullBeamLen, 0, 0);
+    topG.addColorStop(0,   `rgba(${pal.jet},0)`);
+    topG.addColorStop(0.3, `rgba(${pal.jet},${0.5 * topFlash})`);
+    topG.addColorStop(1,   `rgba(${pal.jetHot},${0.85 * topFlash})`);
+    ctx.fillStyle = topG;
+    ctx.beginPath();
+    ctx.moveTo(-baseHalfW, 0);
+    ctx.lineTo(-tipHalfW, -fullBeamLen);
+    ctx.lineTo( tipHalfW, -fullBeamLen);
+    ctx.lineTo( baseHalfW, 0);
+    ctx.closePath();
+    ctx.fill();
+    // Bottom cone — botFlash phase (brightens 180° offset from top).
+    const botG = ctx.createLinearGradient(0, 0, 0, fullBeamLen);
+    botG.addColorStop(0,   `rgba(${pal.jetHot},${0.85 * botFlash})`);
+    botG.addColorStop(0.7, `rgba(${pal.jet},${0.5 * botFlash})`);
+    botG.addColorStop(1,   `rgba(${pal.jet},0)`);
+    ctx.fillStyle = botG;
+    ctx.beginPath();
+    ctx.moveTo(-baseHalfW, 0);
+    ctx.lineTo(-tipHalfW, fullBeamLen);
+    ctx.lineTo( tipHalfW, fullBeamLen);
+    ctx.lineTo( baseHalfW, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Broad halo around the star, in the palette colour. Sub-pixel bodies skip
+  // this — the halo would also be sub-pixel and just wastes draw calls.
+  if (bodyVisible) {
+    ctx.globalCompositeOperation = 'lighter';
+    const halo = ctx.createRadialGradient(p.sx, p.sy, sr * 0.85, p.sx, p.sy, sr * 2.0);
+    halo.addColorStop(0,   `rgba(${pal.halo},0.55)`);
+    halo.addColorStop(0.5, `rgba(${pal.haloMid},0.20)`);
+    halo.addColorStop(1,   `rgba(${pal.haloOut},0)`);
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 2.0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Magnetar — render the massive dipole magnetic field at the same size as
+  // the non-realistic magnetar (drawSunCorona uses (8 + i·11) · 200 sim units
+  // per lobe, with fieldScale=200). My render is in screen pixels, so the
+  // world size is multiplied by viewZoom; lineWidth tracks the same scale.
+  if (b.magnetar) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(p.sx, p.sy);
+    ctx.rotate(beamAngle);
+    const FIELD_SCALE = 200;
+    const RINGS = 5;
+    for (let i = 1; i <= RINGS; i++) {
+      const lobeH = (8 + i * 11) * FIELD_SCALE * viewZoom;
+      const lobeW = lobeH * (0.30 + i * 0.05);
+      const alpha = (0.85 - i * 0.10);
+      ctx.strokeStyle = `rgba(${pal.haloMid},${alpha})`;
+      ctx.lineWidth = Math.max(1.5, 4 * viewZoom);
+      ctx.beginPath();
+      ctx.ellipse(0, -lobeH / 2, lobeW, lobeH / 2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0,  lobeH / 2, lobeW, lobeH / 2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Textured spherical body + limb darkening + bright limb ring — all skipped
+  // when the body is sub-pixel (Houston-scale at solar-system zoom). The
+  // 2 AU beams and magnetar dipole field above stay visible regardless.
+  if (bodyVisible) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+    drawScrolledGlobeAt(getNeutronStarTextureCanvas(paletteKey), p.sx, p.sy, sr, nsSpin, 0);
+    const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.55, p.sx, p.sy, sr);
+    dg.addColorStop(0, 'rgba(0,0,0,0)');
+    dg.addColorStop(1, `rgba(${pal.shadow},0.30)`);
+    ctx.fillStyle = dg;
+    ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+    ctx.restore();
+
+    ctx.globalCompositeOperation = 'lighter';
+    const limb = ctx.createRadialGradient(p.sx, p.sy, sr * 0.88, p.sx, p.sy, sr * 1.08);
+    limb.addColorStop(0,    `rgba(${pal.rim},0)`);
+    limb.addColorStop(0.86, `rgba(${pal.rim},0)`);
+    limb.addColorStop(0.96, `rgba(${pal.rim},0.7)`);
+    limb.addColorStop(1,    `rgba(${pal.halo},0)`);
+    ctx.fillStyle = limb;
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.08, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// A glowing coronal-loop prominence centred on limb angle `ang`. Rendered as a
+// radially-elongated ring-gradient blob whose centre sits on the limb — the
+// inner half is tucked behind the disc when the photosphere is drawn over it,
+// leaving the outer half visible as an arch-shaped glowing loop. No hard stroke
+// (which previously read as a thin tangent ring); the gas reads as gas.
+function _drawBetelProminence(cx, cy, sr, ang, scale, flick) {
+  const ox = Math.cos(ang), oy = Math.sin(ang);
+  // Centre on the limb so half the blob is hidden by the disc on top.
+  const px = cx + ox * sr * 1.02;
+  const py = cy + oy * sr * 1.02;
+  const ringR = sr * (0.28 + 0.16 * scale) * flick;   // outer extent of the loop
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.translate(px, py);
+  ctx.rotate(ang);                                     // align x-axis with radial outward
+  ctx.scale(1.35, 0.78);                               // elongate radially
+  // Hollow-centre ring: bright at the loop body, transparent at the inner gap.
+  const rg = ctx.createRadialGradient(0, 0, ringR * 0.32, 0, 0, ringR);
+  rg.addColorStop(0,    'rgba(180,20,5,0)');
+  rg.addColorStop(0.40, 'rgba(255,80,30,0.55)');
+  rg.addColorStop(0.62, 'rgba(255,135,65,0.55)');
+  rg.addColorStop(0.85, 'rgba(220,30,10,0.18)');
+  rg.addColorStop(1,    'rgba(140,5,0,0)');
+  ctx.fillStyle = rg;
+  ctx.beginPath(); ctx.arc(0, 0, ringR, 0, Math.PI * 2); ctx.fill();
+  // Hot brighter core ring slightly tighter inside the loop body for depth.
+  const rg2 = ctx.createRadialGradient(0, 0, ringR * 0.40, 0, 0, ringR * 0.70);
+  rg2.addColorStop(0, 'rgba(255,150,70,0)');
+  rg2.addColorStop(0.55, 'rgba(255,200,120,0.55)');
+  rg2.addColorStop(1, 'rgba(255,90,30,0)');
+  ctx.fillStyle = rg2;
+  ctx.beginPath(); ctx.arc(0, 0, ringR * 0.70, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// Betelgeuse — bespoke procedural red supergiant, tuned to match the reference
+// art: a bright granulated orange photosphere, a glowing limb, looping
+// prominences, and a gentle variable-star pulsation. Drawn at the same disc
+// size the cartoon path would use (b.radius × (1 + rgFactor·2.5) × 10). A local
+// "betelgeuse.png" next to the app overrides everything for a pixel-exact match.
+function drawRealisticBetelgeuse(b, t) {
+  const rgFactor = getRedGiantFactor(b);
+  const superMul = b.redSuperGiant ? 10 : 1;
+  if (!paused) b._betelT = (b._betelT || 0) + 1;   // frame tick, warp-independent
+  const tt = b._betelT || 0;
+  const pulse = 1 + 0.018 * Math.sin(tt * 0.012);  // Betelgeuse is a variable star
+  const r = b.radius * (1 + rgFactor * 2.5) * superMul * pulse;
+  const p = bodyScreenPos(b);
+  const sr = r * p.scale;
+  if (sr < 0.4) return;
+
+  ctx.save();
+  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
+
+  // Pixel-exact local override (e.g. the reference picture) drawn full so any
+  // baked-in prominences show; black/star margins fall outside a generous clip.
+  const local = loadTex(BETELGEUSE_IMG_LOCAL);
+  if (_texReady(local)) {
+    ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.4, 0, Math.PI * 2); ctx.clip();
+    const iw = local.naturalWidth, ih = local.naturalHeight;
+    const s = (2 * sr) / (0.55 * Math.min(iw, ih));  // assume star ≈ 55% of frame
+    ctx.drawImage(local, p.sx - iw * s / 2, p.sy - ih * s / 2, iw * s, ih * s);
+    ctx.restore();
+    return;
+  }
+
+  // Prominences first, so their feet tuck behind the disc edge.
+  const fl = 1 + 0.12 * Math.sin(tt * 0.03);
+  _drawBetelProminence(p.sx, p.sy, sr, -2.35, 1.25, fl);          // upper-left (big)
+  _drawBetelProminence(p.sx, p.sy, sr,  0.72, 1.10, 2 - fl);      // lower-right (big)
+
+  // Broad luminous halo around the star.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const og = ctx.createRadialGradient(p.sx, p.sy, sr * 0.88, p.sx, p.sy, sr * 1.5);
+  og.addColorStop(0,   'rgba(255,150,45,0.55)');
+  og.addColorStop(0.5, 'rgba(255,90,25,0.20)');
+  og.addColorStop(1,   'rgba(255,45,0,0)');
+  ctx.fillStyle = og;
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr * 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // Granulated photosphere clipped to the disc.
+  ctx.save();
+  ctx.beginPath(); ctx.arc(p.sx, p.sy, sr, 0, Math.PI * 2); ctx.clip();
+  drawScrolledGlobeAt(getBetelgeuseTextureCanvas(), p.sx, p.sy, sr, tt * 0.0006, 0);
+  // Gentle warm limb darkening so it reads as a sphere (stays warm, not black).
+  const dg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.62, p.sx, p.sy, sr);
+  dg.addColorStop(0,    'rgba(0,0,0,0)');
+  dg.addColorStop(0.85, 'rgba(80,12,0,0.12)');
+  dg.addColorStop(1,    'rgba(130,22,0,0.30)');
+  ctx.fillStyle = dg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  // Gentle limb brightening: brighter toward the edge (broad, not a hard ring)
+  // so the rim reads hot like the reference without looking like an outline.
+  ctx.globalCompositeOperation = 'lighter';
+  const rg = ctx.createRadialGradient(p.sx, p.sy, sr * 0.45, p.sx, p.sy, sr);
+  rg.addColorStop(0,    'rgba(255,170,70,0)');
+  rg.addColorStop(0.75, 'rgba(255,170,70,0.05)');
+  rg.addColorStop(1,    'rgba(255,205,110,0.30)');
+  ctx.fillStyle = rg;
+  ctx.fillRect(p.sx - sr, p.sy - sr, sr * 2, sr * 2);
+  ctx.restore();
+
   ctx.restore();
 }
 
@@ -2213,9 +3339,27 @@ function drawRealisticSun_OLD(b, t) {
 function drawRealisticBody(b, t) {
   if (!realisticMode) return false;
   const name = (b.name || '').toLowerCase();
+  // J1407b — bespoke ring-dominant render (no planet body).
+  if (isJ1407bLike(b)) {
+    drawRealisticJ1407b(b);
+    return true;
+  }
+  // ROXs 42Bb — banded reddish gas giant with polar cap + cyclone storm.
+  if (isRoxsLike(b)) {
+    drawRealisticRoxs42Bb(b, b.radius);
+    return true;
+  }
+  // HD 100546b — pale cream-yellow gas giant with subtle banding.
+  if (isHD100546bLike(b)) {
+    drawRealisticHd100546b(b, b.radius);
+    return true;
+  }
   // Famous moons (not in REALISTIC_NAMES): real Galilean photos, or the real
   // Moon photo tinted for cratered rock/ice moons, or a smooth shaded globe.
   if (b.isMoon) {
+    if (name === 'titan')  { drawRealisticTitan(b, b.radius); return true; }
+    if (name === 'triton') { drawRealisticTriton(b, b.radius); return true; }
+    if (name === 'charon') { drawRealisticCharon(b, b.radius); return true; }
     if (MOON_TEX_URLS[name]) {
       if (!drawScrolledRealBody(b, b.radius, MOON_TEX_URLS[name])) drawSmoothMoon(b, b.radius, ['#9a9a9a', '#777', '#444']);
       return true;
@@ -3394,9 +4538,11 @@ function drawSingleRocket(r, t) {
   // Real scale: 2,000,000× smaller than Earth. The rocket art spans ~8 units
   // from its centre, so scale so that becomes Earth's radius / 2e6. (This makes
   // it microscopic — use 🚀 Follow Rocket and zoom right in to see it.)
+  // When bigRockets mode is on, drop the 2e6 factor so the rocket renders at
+  // Earth scale (≈ Earth's radius wide).
   const _earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
   const _earthR = _earthB ? _earthB.radius : 0.2564;
-  const _rs = (_earthR / 2e6) / 8;
+  const _rs = bigRockets ? (_earthR / 8) : ((_earthR / 2e6) / 8);
   ctx.save();
   ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
   ctx.translate(sx, sy);
@@ -3474,29 +4620,35 @@ function ufoWorldRadius() {
   return Math.max(0.08, (e ? e.radius : 0.2564) * 0.6);
 }
 
-const UFO_ATTACK_MS = 16000;   // sim-time bombarding Earth before retreat
+const UFO_VISIT_MS  = 9000;    // sim-time landed / visiting before takeoff
 const UFO_LEAVE_MS  = 9000;    // sim-time retreating before despawn
-const UFO_ROLL_MS   = 20000;   // real-time between invasion rolls
+const UFO_ROLL_MS   = 20000;   // real-time between visit rolls
 const UFO_CHANCE    = 0.10;    // 10% chance per roll
-const UFO_INVISIBLE_CHANCE = 0.10; // 10% of invasions are cloaked / undetected
+const UFO_INVISIBLE_CHANCE = 0.10; // 10% of visits are cloaked / undetected
+const UFO_MOON_VISIT_CHANCE = 0.30; // 30% per ship visits the Moon instead of Earth
 let _ufoRollAccum   = 0;
 
-// Spawn a wave of saucers from Mars headed for Earth. Returns false if Mars or
-// Earth isn't present. `count` overrides the default 2–4 saucers.
+// Spawn a wave of friendly saucers from Mars headed for Earth (or, for some
+// of them, the Moon) to visit. Returns false if Mars or Earth isn't present.
+// `count` overrides the default 2–4 saucers.
 function spawnUfoInvasion(count, invisible) {
   const mars = findMarsBody(), earth = findEarthBody();
   if (!mars || !earth) return false;
+  // Earth's Moon, if present — some visitors prefer landing there.
+  const moon = bodies.find(b => b.isMoon && (b.rootPlanetName || '').toLowerCase() === 'earth');
   const wr = ufoWorldRadius();
-  // 10% of (random) invasions are CLOAKED: the saucers are invisible and the
-  // detection HUD never warns — Earth just starts taking unexplained laser hits.
-  // Callers can force the state (admin spawn / Watch Aliens force visible).
+  // 10% of arrivals are CLOAKED: the saucers are invisible and the detection
+  // HUD never warns. Callers can force the state (admin spawn / Watch Aliens).
   const invis = (typeof invisible === 'boolean') ? invisible : (Math.random() < UFO_INVISIBLE_CHANCE);
   const n = count || (2 + Math.floor(Math.random() * 3));
   for (let i = 0; i < n; i++) {
+    // Each saucer picks its own destination so a single wave can split between
+    // Earth and the Moon.
+    const targetBody = (moon && Math.random() < UFO_MOON_VISIT_CHANCE) ? moon : earth;
     const ang = Math.random() * Math.PI * 2;
     const off = mars.radius + wr * (3 + Math.random() * 5);
     const x = mars.x + Math.cos(ang) * off, y = mars.y + Math.sin(ang) * off;
-    const dx = earth.x - x, dy = earth.y - y, d = Math.hypot(dx, dy) || 1;
+    const dx = targetBody.x - x, dy = targetBody.y - y, d = Math.hypot(dx, dy) || 1;
     const sp = 0.6 + Math.random() * 0.4;
     ufos.push({
       x, y,
@@ -3505,10 +4657,11 @@ function spawnUfoInvasion(count, invisible) {
       heading: Math.atan2(dy, dx),
       state: 'incoming', stateAtSim: simTime,
       bob: Math.random() * Math.PI * 2,
-      hue: 110 + Math.random() * 60,            // light/beam hue: green → cyan
+      hue: 110 + Math.random() * 60,            // friendly green-cyan glow
       orbitDir: Math.random() < 0.5 ? 1 : -1,
-      invisible: invis,                         // cloaked → not drawn, not detected
-      lastFire: simTime, beamUntil: 0
+      invisible: invis,
+      targetId: targetBody.id,
+      landAngle: null                           // set when landing — fixed spot on the body
     });
   }
   return true;
@@ -3516,38 +4669,40 @@ function spawnUfoInvasion(count, invisible) {
 
 function updateUfos(dtUnits) {
   if (!ufos.length) return;
-  const earth = findEarthBody();
   const wr = ufoWorldRadius();
-  const standoff = (earth ? earth.radius : 1) + wr * 7;
   const bobStep = 0.10 * Math.min(Math.max(dtUnits, 0.2), 6);
   for (let i = ufos.length - 1; i >= 0; i--) {
     const u = ufos[i];
     u.bob += bobStep;
-    if (!earth && u.state !== 'leaving') { u.state = 'leaving'; u.stateAtSim = simTime; }
+    const target = u.targetId ? bodies.find(b => b.id === u.targetId) : null;
+    if (!target && u.state !== 'leaving') { u.state = 'leaving'; u.stateAtSim = simTime; }
 
-    if (u.state === 'incoming' && earth) {
-      const dx = earth.x - u.x, dy = earth.y - u.y, d = Math.hypot(dx, dy) || 1;
-      u.vx = (earth.vx || 0) + dx / d;            // engine seek toward Earth
-      u.vy = (earth.vy || 0) + dy / d;
+    if (u.state === 'incoming' && target) {
+      // Seek toward the chosen body (Earth or Moon).
+      const dx = target.x - u.x, dy = target.y - u.y, d = Math.hypot(dx, dy) || 1;
+      u.vx = (target.vx || 0) + dx / d;
+      u.vy = (target.vy || 0) + dy / d;
       u.heading = Math.atan2(dy, dx);
-      if (d < standoff * 1.15) { u.state = 'attacking'; u.stateAtSim = simTime; u.lastFire = simTime; }
-    } else if (u.state === 'attacking' && earth) {
-      const dx = earth.x - u.x, dy = earth.y - u.y, d = Math.hypot(dx, dy) || 1;
-      const ux = dx / d, uy = dy / d;
-      const tx = -uy * u.orbitDir, ty = ux * u.orbitDir;   // tangential → orbit Earth
-      const radialErr = d - standoff;
-      u.vx = (earth.vx || 0) + ux * radialErr * 0.08 + tx * 0.45;
-      u.vy = (earth.vy || 0) + uy * radialErr * 0.08 + ty * 0.45;
-      u.heading = Math.atan2(dy, dx);
-      if (simTime - u.lastFire > 1100) {          // periodic laser strike + impact flash
-        u.lastFire = simTime;
-        u.beamUntil = simTime + 400;
-        spawnMergeEffect(earth.x - ux * earth.radius, earth.y - uy * earth.radius, '#9dff3c');
+      // Close enough to land: pick a fixed surface spot and switch to visiting.
+      if (d < target.radius + wr * 1.2) {
+        u.state = 'visiting';
+        u.stateAtSim = simTime;
+        u.landAngle = Math.atan2(u.y - target.y, u.x - target.x);
       }
-      if (simTime - u.stateAtSim > UFO_ATTACK_MS) { u.state = 'leaving'; u.stateAtSim = simTime; }
+    } else if (u.state === 'visiting' && target) {
+      // Glued to a fixed point just above the body's surface, tracking its
+      // motion so the saucer rides along as the planet/moon orbits.
+      const surfaceR = target.radius + wr * 0.35;
+      u.x = target.x + Math.cos(u.landAngle) * surfaceR;
+      u.y = target.y + Math.sin(u.landAngle) * surfaceR;
+      u.vx = target.vx || 0;
+      u.vy = target.vy || 0;
+      // Orient the saucer flat against the surface (tangent to the body).
+      u.heading = u.landAngle + Math.PI / 2;
+      if (simTime - u.stateAtSim > UFO_VISIT_MS) { u.state = 'leaving'; u.stateAtSim = simTime; }
     } else if (u.state === 'leaving') {
       let ax, ay;
-      if (earth) { const dx = u.x - earth.x, dy = u.y - earth.y, d = Math.hypot(dx, dy) || 1; ax = dx / d; ay = dy / d; }
+      if (target) { const dx = u.x - target.x, dy = u.y - target.y, d = Math.hypot(dx, dy) || 1; ax = dx / d; ay = dy / d; }
       else { const s = Math.hypot(u.vx, u.vy) || 1; ax = u.vx / s; ay = u.vy / s; }
       u.vx = ax * 1.7; u.vy = ay * 1.7;
       u.heading = Math.atan2(u.vy, u.vx);
@@ -3561,44 +4716,13 @@ function updateUfos(dtUnits) {
 function drawUfos(t) {
   if (!ufos.length) return;
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  const earth = findEarthBody();
   const screenR = ufoWorldRadius() * viewZoom;
-  if (screenR < 0.5) return;          // sub-pixel when zoomed out — the banner still warns
+  if (screenR < 0.5) return;          // sub-pixel when zoomed out — the banner still notifies
   for (const u of ufos) {
     const sx = (u.x - viewX) * viewZoom + w / 2;
     const sy = (u.y - viewY) * viewZoom + h / 2;
-    if (u.beamUntil && simTime < u.beamUntil && earth) {
-      const ex = (earth.x - viewX) * viewZoom + w / 2;
-      const ey = (earth.y - viewY) * viewZoom + h / 2;
-      drawUfoBeam(sx, sy, ex, ey, screenR, u, t);   // beams show even for cloaked craft
-    }
     if (!u.invisible) drawSaucer(sx, sy, screenR, u, t, realisticMode);
   }
-}
-
-// Laser beam from a saucer's emitter down to its impact point on Earth. Screen
-// coords; additive so it glows. Tapered cone + bright core + impact bloom.
-function drawUfoBeam(sx, sy, ex, ey, R, u, t) {
-  const flick = 0.6 + 0.4 * Math.sin(t * 0.4 + u.bob);
-  const col = (a) => `hsla(${u.hue | 0},100%,60%,${a})`;
-  const ang = Math.atan2(ey - sy, ex - sx), perp = ang + Math.PI / 2;
-  const wCore = Math.max(1, R * 0.16), wOuter = R * 0.55;
-  ctx.save();
-  ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.beginPath();
-  ctx.moveTo(sx + Math.cos(perp) * wCore, sy + Math.sin(perp) * wCore);
-  ctx.lineTo(sx - Math.cos(perp) * wCore, sy - Math.sin(perp) * wCore);
-  ctx.lineTo(ex - Math.cos(perp) * wOuter, ey - Math.sin(perp) * wOuter);
-  ctx.lineTo(ex + Math.cos(perp) * wOuter, ey + Math.sin(perp) * wOuter);
-  ctx.closePath();
-  ctx.fillStyle = col(0.18 * flick); ctx.fill();
-  ctx.strokeStyle = col(0.9 * flick); ctx.lineWidth = wCore;
-  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-  const ig = ctx.createRadialGradient(ex, ey, 0, ex, ey, R * 1.4);
-  ig.addColorStop(0, col(0.9 * flick)); ig.addColorStop(1, col(0));
-  ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(ex, ey, R * 1.4, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
 }
 
 // A flying saucer centred at screen (cx,cy), body radius R px. `realistic` →
@@ -3669,15 +4793,15 @@ function drawSaucer(cx, cy, R, u, t, realistic) {
   ctx.restore();
 }
 
-// Transient top-of-screen warning while a DETECTED invasion is active (inbound
-// / attacking). Cloaked (invisible) saucers are excluded, so a stealth wave
-// shows no warning even as Earth takes hits.
+// Transient top-of-screen notice while detected friendly saucers are around
+// (inbound or visiting). Cloaked (invisible) saucers are excluded so a stealth
+// visit shows no banner.
 function drawInvasionBanner(t) {
   const detected = ufos.filter(u => !u.invisible);
   if (!detected.length) return;
   const w = canvas.clientWidth;
-  const attacking = detected.some(u => u.state === 'attacking');
-  const msg = attacking ? '👽 MARTIAN UFOs ATTACKING EARTH' : '👽 MARTIAN UFOs INBOUND TO EARTH';
+  const visiting = detected.some(u => u.state === 'visiting');
+  const msg = visiting ? '👽 MARTIAN VISITORS HAVE LANDED' : '👽 MARTIAN VISITORS INBOUND';
   const alpha = 0.55 + 0.45 * Math.sin(t * 0.2);
   ctx.save();
   ctx.setTransform(RENDER_DPR, 0, 0, RENDER_DPR, 0, 0);
@@ -4602,6 +5726,13 @@ function drawSunCorona(sun, t) {
   if (phase === 'neutron-star' || phase === 'dormant-neutron-star') {
     const dormant = phase === 'dormant-neutron-star';
     const pulse = 1 + 0.3 * Math.sin(t * 0.02);
+    // Real neutron stars are ~300× smaller than Earth (Houston-sized). Visual
+    // body radius drops to Earth/300 by default, or Earth/2 with the 💫 Big NS
+    // toggle. Beams always extend a fixed 2 AU regardless of body size.
+    const _nsEarthB = bodies.find(x => (x.name || '').toLowerCase() === 'earth');
+    const _nsEarthR = _nsEarthB ? _nsEarthB.radius : 0.2564;
+    const _nsBodyR = bigNeutronStars ? (_nsEarthR * 0.5) : (_nsEarthR / 300);
+    const _nsBeamLen = 2 * _AU_SIM_UNITS;
     if (sun.strangeMatter || sun.magnetar) {
       const isMagnetar = !!sun.magnetar;
       const fieldScale = isMagnetar ? 200 : 1;
@@ -4616,23 +5747,40 @@ function drawSunCorona(sun, t) {
       ctx.translate(sun.x, sun.y);
       ctx.rotate(axisAngle);
 
-      // Pulsar jets along the magnetic axis (length scaled with the field)
-      // Strange-NS jets are much longer than the dipole-field rings;
-      // magnetar still scales by fieldScale (200×) on top of the magnetar base.
-      // Suppressed on dormant neutron stars (beams have shut off).
+      // Pulsar jets along the magnetic axis — fixed 2 AU each side, cone shape
+      // (narrow at the body, widening out to the tip). Suppressed on dormant
+      // neutron stars (beams have shut off).
       if (!dormant) {
-        const beamBase   = isMagnetar ?  90 : 320;
-        const beamWobble = isMagnetar ?  30 : 80;
-        const beamLen = (beamBase + beamWobble * Math.sin(t * 0.012)) * fieldScale;
-        const beamG = ctx.createLinearGradient(0, -beamLen, 0, beamLen);
-        beamG.addColorStop(0,    `rgba(${pal.beam},0)`);
-        beamG.addColorStop(0.45, `rgba(${pal.beam},0.7)`);
-        beamG.addColorStop(0.5,  `rgba(${pal.beamHot},0.95)`);
-        beamG.addColorStop(0.55, `rgba(${pal.beam},0.7)`);
-        beamG.addColorStop(1,    `rgba(${pal.beam},0)`);
-        ctx.fillStyle = beamG;
+        const beamLen = _nsBeamLen;
         const beamWidth = isMagnetar ? 14 : 6;
-        ctx.fillRect(-beamWidth / 2, -beamLen, beamWidth, beamLen * 2);
+        const baseHalfW = beamWidth * 0.15;
+        const tipHalfW  = beamWidth * 10;   // flares outward dramatically
+        // Top cone — fades from bright at body to transparent at tip.
+        const topG = ctx.createLinearGradient(0, 0, 0, -beamLen);
+        topG.addColorStop(0,   `rgba(${pal.beamHot},0.95)`);
+        topG.addColorStop(0.2, `rgba(${pal.beam},0.7)`);
+        topG.addColorStop(1,   `rgba(${pal.beam},0)`);
+        ctx.fillStyle = topG;
+        ctx.beginPath();
+        ctx.moveTo(-baseHalfW, 0);
+        ctx.lineTo(-tipHalfW, -beamLen);
+        ctx.lineTo( tipHalfW, -beamLen);
+        ctx.lineTo( baseHalfW, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Bottom cone (mirror).
+        const botG = ctx.createLinearGradient(0, 0, 0, beamLen);
+        botG.addColorStop(0,   `rgba(${pal.beamHot},0.95)`);
+        botG.addColorStop(0.2, `rgba(${pal.beam},0.7)`);
+        botG.addColorStop(1,   `rgba(${pal.beam},0)`);
+        ctx.fillStyle = botG;
+        ctx.beginPath();
+        ctx.moveTo(-baseHalfW, 0);
+        ctx.lineTo(-tipHalfW, beamLen);
+        ctx.lineTo( tipHalfW, beamLen);
+        ctx.lineTo( baseHalfW, 0);
+        ctx.closePath();
+        ctx.fill();
       }
 
       // Dipole field lines: two stacked elliptical lobes (top + bottom) per ring
@@ -4656,16 +5804,18 @@ function drawSunCorona(sun, t) {
       }
       ctx.restore();
 
-      // Bright core (un-rotated so it stays centered)
+      // Bright core (un-rotated so it stays centered) — at the real NS size
+      // (Houston-scale / Earth/300 by default, or half-Earth with 💫 Big NS).
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const coreG = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, 14 * pulse);
+      const _coreR = _nsBodyR * pulse;
+      const coreG = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, _coreR);
       coreG.addColorStop(0, 'rgba(255,255,255,1)');
       coreG.addColorStop(0.3, `rgba(${pal.coreIn},0.85)`);
       coreG.addColorStop(1, `rgba(${pal.coreOut},0)`);
       ctx.fillStyle = coreG;
       ctx.beginPath();
-      ctx.arc(sun.x, sun.y, 14 * pulse, 0, Math.PI * 2);
+      ctx.arc(sun.x, sun.y, _coreR, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
       return;
@@ -4720,15 +5870,18 @@ function drawSunCorona(sun, t) {
     const beamAngle = Math.atan2(sinTilt * cosTheta, cosTilt);
     // Foreshortening: how much of the cone-tip length we see in the plane
     const lenFactor = Math.sqrt(cosTilt * cosTilt + sinTilt * sinTilt * cosTheta * cosTheta);
-    const fullBeamLen = (400 + 80 * Math.sin(t * 0.015)) * lenFactor;
+    // Beams extend a fixed 2 AU each side, foreshortened as the magnetic
+    // axis tips toward/away from the viewer.
+    const fullBeamLen = _nsBeamLen * lenFactor;
     // Top beam brightens when its tip swings toward the viewer (+Z);
     // bottom beam does the opposite. Squared so the flash spikes.
     const topZ = Math.max(0, sinTheta);
     const botZ = Math.max(0, -sinTheta);
     const topFlash = 0.35 + 0.65 * topZ * topZ;
     const botFlash = 0.35 + 0.65 * botZ * botZ;
-    const baseHalfW = 6;
-    const tipHalfW = 0.8;
+    // Cone flares outward dramatically: narrow at body, much wider at tip.
+    const baseHalfW = 0.8;
+    const tipHalfW = 60;
 
     // Dormant neutron stars have shut their beams off — render only the core.
     if (!dormant) {
@@ -4768,16 +5921,18 @@ function drawSunCorona(sun, t) {
       ctx.restore();
     }
 
-    // Bright pulsating core (un-rotated so it stays put while beams sweep)
+    // Bright pulsating core (un-rotated so it stays put while beams sweep) —
+    // sized at the real NS scale (Houston-tiny, or half-Earth with the toggle).
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const g = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, 20 * pulse);
+    const _coreR = _nsBodyR * pulse;
+    const g = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, _coreR);
     g.addColorStop(0, 'rgba(200,220,255,0.95)');
     g.addColorStop(0.3, 'rgba(100,150,255,0.4)');
     g.addColorStop(1, 'rgba(50,80,200,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(sun.x, sun.y, 20 * pulse, 0, Math.PI * 2);
+    ctx.arc(sun.x, sun.y, _coreR, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
@@ -5255,12 +6410,53 @@ function drawBody(b, t) {
     const evo = getSunEvolutionFactor(b);
     const phase = getSunPhase(b);
     const rgFactor = getRedGiantFactor(b);
+    // Betelgeuse — bespoke red-supergiant render (granulated orange photosphere,
+    // prominences, bright limb), drawn INSTEAD of the generic corona/disc path
+    // and not gated behind Realistic mode. Optional pixel-exact local override.
+    if (isBetelgeuseLike(b)) {
+      drawRealisticBetelgeuse(b, t);
+      return;
+    }
+    // Rigel — bespoke blue-supergiant render (granulated cyan-blue photosphere,
+    // bright cyan-white limb ring, broad cyan halo). Replaces the generic BSG
+    // corona/disc for any star named "Rigel".
+    if (isRigelLike(b)) {
+      drawRealisticRigel(b, t);
+      return;
+    }
+    // 2MASS J0523-1403 — bespoke ultracool L-dwarf render (granulated deep-red
+    // photosphere, strong limb darkening, dim red halo).
+    if (is2MASSJ05231403Like(b)) {
+      drawRealistic2MASS(b, t);
+      return;
+    }
+    // Neutron stars (incl. magnetar / strange-matter / dormant) — unified
+    // blue-white textured body + twin tilted jets, no flares / field lines.
+    // Gated behind Realistic mode; non-realistic mode keeps the original
+    // pulsar-beam / dipole-field look in drawSunCorona.
+    if (realisticMode && (phase === 'neutron-star' || phase === 'dormant-neutron-star')) {
+      drawNeutronStarBody(b, t);
+      return;
+    }
+    // Realistic supergiants — smooth glowing sphere + halo, matching the
+    // reference style. Replaces the cartoon corona/disc for BSG / RSG / regular
+    // RG / KSG when realistic mode is on. Named special stars (Betelgeuse,
+    // Rigel) already returned above with their own bespoke renderers.
+    if (realisticMode && (phase === 'blue-super-giant' || phase === 'red-giant' || phase === 'k-super-giant')) {
+      drawRealisticSupergiant(b, t);
+      return;
+    }
     drawSunCorona(b, t);
-    // Realistic mode for a body named "Sun" (must be main-sequence — we don't
-    // try to map evolutionary phases to photographs). Paints over the disc
-    // after the corona; face/glow code is skipped below.
-    if (realisticMode && (b.name || '').toLowerCase() === 'sun' && phase === 'main-sequence') {
-      drawRealisticSun(b, t);
+    // Realistic mode for any main-sequence star — granulated procedural
+    // photosphere with mass-based colour (M red → O blue), tinted halo. Skipped
+    // for evolved phases (red giant, white dwarf, ...) which keep the existing
+    // phase-specific look. Drawn over the corona; face/glow below are skipped.
+    // The literal "Sun" keeps its bespoke warm yellow-orange ramp (drawRealisticSun)
+    // — the mass-based generic look is slightly paler at G-type, and we want
+    // our home star to read as the familiar Sun.
+    if (realisticMode && phase === 'main-sequence') {
+      if ((b.name || '').toLowerCase() === 'sun') drawRealisticSun(b, t);
+      else drawRealisticStar(b, t);
       return;
     }
 
@@ -5371,7 +6567,32 @@ function drawBody(b, t) {
     const _isSaturn  = isSaturnLike(b);
     const _isJ1407b  = isJ1407bLike(b);
     if (_isSaturn) drawSaturnRings(b, true, 1);
-    else if (_isJ1407b) drawJ1407bRings(b, true);
+    else if (_isJ1407b) {
+      // J1407b — back rings → central planet → front rings. The planet's
+      // physics b.radius is far too small to "hold" the massive ring system
+      // visually, so paint a Jupiter-style gas giant at a fraction of the
+      // outer ring radius so it sits clearly inside the central gap. Both
+      // halves draw unconditionally so the rings are never cut off when
+      // the body would otherwise be sub-pixel.
+      drawJ1407bRings(b, true);
+      const outerRingR = b.radius * 2.27 * 40000;
+      const visR = outerRingR * 0.03;          // ~3% of outer ring radius
+      ctx.save();
+      ctx.shadowColor = '#d9bc92';
+      ctx.shadowBlur = visR * 0.6;
+      const bodyG = ctx.createRadialGradient(b.x - visR * 0.3, b.y - visR * 0.3, 0, b.x, b.y, visR);
+      bodyG.addColorStop(0,    '#f0d8a8');     // bright cream highlight
+      bodyG.addColorStop(0.55, '#caa987');     // tan body
+      bodyG.addColorStop(1,    '#6b4528');     // warm rim
+      ctx.fillStyle = bodyG;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, visR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      drawJ1407bRings(b, false);
+      if (_displayR !== _origR) b.radius = _origR;
+      return;
+    }
 
     // Body draw. In 2D, render in a SCREEN-SPACE local frame (centred at the
     // body's screen position, scaled by zoom, rotated by spin) so every path
@@ -5837,7 +7058,10 @@ let viewZoom = 1;             // 1 = default; >1 zooms in
 let autoFollow = true;
 let lockTargetId = null;   // camera-lock: when set, the view re-centers on this body every frame
 let followRocket = false;  // when on, the camera follows the first rocket each frame
-let watchAliens = false;   // when on, the camera frames Earth + the attacking saucers
+let watchAliens = false;   // when on, the camera follows the friendly visiting saucers
+let aliensDisabled = false; // when on, no periodic Martian invasions and any active wave is cleared
+let bigRockets = false;    // when on, rockets render at Earth-scale instead of the realistic 2,000,000× smaller
+let bigNeutronStars = false; // when on, realistic NS render at half-Earth size instead of the realistic Houston-size (Earth/300)
 
 // ---- 3D Mode ----
 // When is3D is true, bodies carry z + vz and rendering applies a perspective
@@ -5948,7 +7172,10 @@ function loop(t) {
 
   // Advance animTime only when running, scaled by the speed multiplier so
   // animations slow with the simulation (and speed up at higher multipliers).
-  const realDt = lastLoopTime > 0 ? (t - lastLoopTime) : 16.67;
+  // Clamp the frame delta: a backgrounded tab produces a multi-second gap on
+  // the first frame back, which — multiplied by speedMul into simTime — would
+  // fast-forward stellar evolution by eons in a single lurch.
+  const realDt = Math.min(lastLoopTime > 0 ? (t - lastLoopTime) : 16.67, 100);
   if (!paused) animTime += realDt * speedMul;
 
   // Advance each body's axial spin. Scaled by the speed multiplier so spin
@@ -6036,7 +7263,7 @@ function loop(t) {
     _ufoRollAccum += realDt;
     if (_ufoRollAccum >= UFO_ROLL_MS) {
       _ufoRollAccum = 0;
-      if (!ufos.length && findMarsBody() && findEarthBody() && Math.random() < UFO_CHANCE) {
+      if (!aliensDisabled && !ufos.length && findMarsBody() && findEarthBody() && Math.random() < UFO_CHANCE) {
         spawnUfoInvasion();
       }
     }
@@ -6059,22 +7286,49 @@ function loop(t) {
     viewY = rk.y;
     const earthB = bodies.find(b => (b.name || '').toLowerCase() === 'earth');
     const earthR = earthB ? earthB.radius : 0.2564;
-    const rocketLen = (earthR / 2e6) / 8 * 16;        // base art length (16u) × scale
+    const rocketLen = (bigRockets ? (earthR / 8) : ((earthR / 2e6) / 8)) * 16;
     const targetZoom = 0.8 * Math.min(w, h) / rocketLen;
     viewZoom += (targetZoom - viewZoom) * 0.15;        // smooth zoom-in to ~80%
   } else if (followRocket && !rockets.length) {
     followRocket = false;    // nothing left to follow
   } else if (watchAliens && ufos.length) {
-    // Frame Earth (centred) at a fixed, tight zoom on the attack ring — the
-    // radius where saucers orbit and fire. Incoming craft simply fly into view
-    // from the edges (no zooming out to chase them across the Mars→Earth gap).
+    // Camera tracks the LEADING visible UFO (closest to Earth) so it's always
+    // clearly visible regardless of where the rest of the wave is. While the
+    // saucer is inbound from Mars we just follow it tightly; once it gets close
+    // to Earth we expand the frame to include both. Prior bounding-box-of-all
+    // logic zoomed too far out (UFOs appeared as invisible dots).
     const earth = findEarthBody();
-    if (earth) {
-      viewX = earth.x; viewY = earth.y;
-      const standoff = earth.radius + ufoWorldRadius() * 7;  // matches updateUfos
-      const targetZoom = 0.35 * Math.min(w, h) / Math.max(standoff, 1e-6);
-      viewZoom += (targetZoom - viewZoom) * 0.12;
-    } else { watchAliens = false; }
+    const visible = ufos.filter(u => !u.invisible);
+    if (earth && visible.length) {
+      let closest = visible[0], bestD2 = Infinity;
+      for (const u of visible) {
+        const dx = u.x - earth.x, dy = u.y - earth.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) { bestD2 = d2; closest = u; }
+      }
+      const wr = ufoWorldRadius();
+      const ENGAGE_R = wr * 30;       // when this close to Earth, frame both
+      if (Math.sqrt(bestD2) <= ENGAGE_R) {
+        const minX = Math.min(earth.x - earth.radius, closest.x - wr);
+        const minY = Math.min(earth.y - earth.radius, closest.y - wr);
+        const maxX = Math.max(earth.x + earth.radius, closest.x + wr);
+        const maxY = Math.max(earth.y + earth.radius, closest.y + wr);
+        viewX = (minX + maxX) / 2;
+        viewY = (minY + maxY) / 2;
+        const span = Math.max(maxX - minX, maxY - minY) * 1.4;
+        const targetZoom = Math.min(w, h) / Math.max(span, 1e-6);
+        viewZoom += (targetZoom - viewZoom) * 0.12;
+      } else {
+        // Far inbound: follow the leading saucer at a fixed comfortable zoom
+        // (UFO ≈ 20% of the viewport's smaller dimension).
+        viewX = closest.x;
+        viewY = closest.y;
+        const targetZoom = Math.min(w, h) * 0.10 / wr;
+        viewZoom += (targetZoom - viewZoom) * 0.12;
+      }
+    } else if (!earth) {
+      watchAliens = false;
+    }
   } else if (watchAliens && !ufos.length) {
     watchAliens = false;     // invasion over — release
   } else if (lockTargetId) {
@@ -6394,6 +7648,14 @@ function buildControls() {
       const vmul = s.velMul !== undefined ? s.velMul : 1;
       const sunLockCls = s.locked ? 'lock-btn locked' : 'lock-btn';
       const sunLockIcon = s.locked ? '🔒' : '🔓';
+      // Sun / Betelgeuse / Rigel have fixed canonical masses — the slider is
+      // disabled and updateSunMass refuses to change them. Rename back unlocks.
+      const lowerName = (s.name || '').toLowerCase();
+      const fixedMassTitle = FIXED_MASS_TITLE[lowerName];
+      const massSliderAttrs = fixedMassTitle
+        ? `disabled title="${fixedMassTitle}" style="opacity:0.5;cursor:not-allowed"`
+        : `oninput="updateSunMass('${s.id}', Math.pow(10, parseFloat(this.value)))"`;
+      const massLabelExtra = fixedMassTitle ? ' <span style="color:#666;font-size:0.85em">(fixed)</span>' : '';
       sunHtml += `
       <div class="body-card" id="card-${s.id}">
         <div class="body-card-header">
@@ -6407,9 +7669,8 @@ function buildControls() {
         </div>
         <div style="font-size:0.7em;color:#777;margin-bottom:6px;letter-spacing:0.3px" id="phase-${s.id}">${getPhaseLabel(s)}</div>
         <div class="slider-group">
-          <div class="slider-label"><span>Mass</span><span class="slider-value" id="mass-val-${s.id}">${formatMass(s.mass)}</span></div>
-          <input type="range" min="1.9031" max="14" step="0.01" value="${Math.log10(Math.max(80, s.mass))}"
-            oninput="updateSunMass('${s.id}', Math.pow(10, parseFloat(this.value)))">
+          <div class="slider-label"><span>Mass${massLabelExtra}</span><span class="slider-value" id="mass-val-${s.id}">${formatMass(s.mass)}</span></div>
+          <input type="range" min="1.9031" max="14" step="0.01" value="${Math.log10(Math.max(80, s.mass))}" ${massSliderAttrs}>
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Velocity</span><span class="slider-value" id="vel-val-${s.id}">${vmul.toFixed(2)}×</span></div>
@@ -6477,9 +7738,21 @@ function buildControls() {
   populateBodySelect();
 }
 
+// Stars whose mass is locked to a canonical real-world value. Map name → the
+// tooltip shown on the disabled slider.
+const FIXED_MASS_TITLE = {
+  sun:                "The Sun's mass is fixed at 1 M☉",
+  betelgeuse:         "Betelgeuse's mass is fixed at 19.4 M☉",
+  rigel:              "Rigel's mass is fixed at 21 M☉",
+  '2mass j0523-1403': "2MASS J0523-1403's mass is fixed at 0.07 M☉"
+};
+
 function updateSunMass(id, v) {
   const sun = bodies.find(b => b.id === id);
   if (sun) {
+    // Canonical fixed-mass stars (Sun / Betelgeuse / Rigel) refuse mass changes
+    // here too, so other callers can't sneak a change through the panel.
+    if (FIXED_MASS_TITLE[(sun.name || '').toLowerCase()]) return;
     const newMass = parseFloat(v);
     sun.mass = newMass;
     sun.radius = 28 + Math.cbrt(sun.mass / 1000) * 4;
@@ -7690,9 +8963,13 @@ function toggleWatchAliens() {
   if (watchAliens) {
     watchAliens = false;
   } else {
+    if (aliensDisabled) {
+      alert('Aliens are disabled — turn off "Disable Aliens" to watch an invasion.');
+      return;
+    }
     if (!ufos.some(u => !u.invisible)) {   // nothing visible to watch → summon a wave
       if (!spawnUfoInvasion(undefined, false)) {
-        alert('Need both Mars and Earth in the scene to watch an alien attack.');
+        alert('Need both Mars and Earth in the scene to watch the Martian visitors.');
         return;
       }
     }
@@ -7704,6 +8981,42 @@ function toggleWatchAliens() {
   }
   const btn = document.getElementById('btn-watch-aliens');
   if (btn) btn.classList.toggle('active', watchAliens);
+}
+
+// Disable Aliens: when on, no periodic Martian invasions are rolled and any
+// active wave is cleared immediately. Also releases Watch Aliens if it's
+// running (otherwise the camera would have nothing to frame).
+function toggleDisableAliens() {
+  aliensDisabled = !aliensDisabled;
+  if (aliensDisabled) {
+    ufos = [];
+    _ufoRollAccum = 0;
+    if (watchAliens) {
+      watchAliens = false;
+      const wb = document.getElementById('btn-watch-aliens');
+      if (wb) wb.classList.remove('active');
+    }
+  }
+  const btn = document.getElementById('btn-disable-aliens');
+  if (btn) btn.classList.toggle('active', aliensDisabled);
+}
+
+// Big Rockets mode: when on, rockets render at Earth scale instead of the
+// realistic ~2,000,000× smaller (which made them invisible without Follow
+// Rocket + extreme zoom).
+function toggleBigRockets() {
+  bigRockets = !bigRockets;
+  const btn = document.getElementById('btn-big-rockets');
+  if (btn) btn.classList.toggle('active', bigRockets);
+}
+
+// Big Neutron Stars mode: when on, realistic-mode neutron stars render at
+// half-Earth radius instead of Houston-size (Earth/300). Off matches real
+// physical scale; on makes them easier to spot without zooming way in.
+function toggleBigNeutronStars() {
+  bigNeutronStars = !bigNeutronStars;
+  const btn = document.getElementById('btn-big-ns');
+  if (btn) btn.classList.toggle('active', bigNeutronStars);
 }
 
 // Show a picker modal listing every other body; clicking one runs setOrbit.
@@ -7789,6 +9102,205 @@ function renameBody(id) {
     delete b.whiteDwarfAtSim;
     delete b.redGiantAtSim;
     delete b.nebulaResolved;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "Sun" → snap this body to a fresh main-sequence Sun, age zero.
+  // Mass becomes 1 M☉ and the panel slider is locked (see buildControls).
+  if (normName === 'sun' && !b.isComet) {
+    b.isSun = true;
+    b.mass = 1000;
+    b.radius = 28;
+    b.color = getStarColor(1000);
+    b.stellarPhase = 'main-sequence';
+    b.phaseAtSim = simTime;
+    b.createdAtSim = simTime;
+    b.trail = [];
+    // Wipe leftover state from a previous evolved life — without these the Sun
+    // would still time-out via cached red-giant/white-dwarf/nebula markers.
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.continents;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "Betelgeuse" → snap to a 19.4 M☉ red supergiant. updateBetelgeuseRadii
+  // grows the disc to Jupiter's orbit over BETELGEUSE_GROW_SEC.
+  if (normName === 'betelgeuse' && !b.isComet) {
+    b.isSun = true;
+    b.mass = BETELGEUSE_MASS;
+    b.radius = 28 + Math.cbrt(b.mass / 1000) * 4;
+    b.color = BETELGEUSE_COLOR;
+    b.stellarPhase = 'red-giant';
+    b.redSuperGiant = true;
+    b.redGiantAtSim = simTime - 10000;
+    b.phaseAtSim = simTime;
+    b.createdAtSim = simTime;
+    b.betelgeuseStartSim = simTime;
+    b.trail = [];
+    delete b.accretionRing;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.continents;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "2MASS J0523-1403" → snap to a 0.07 M☉ ultracool L-dwarf at a
+  // Saturn-ish display radius (locked by updateSmallStars every frame).
+  // Rename to "HD 100546b" → snap to a 1.65 M_jup gas giant. Realistic-mode
+  // renderer paints the cream banded look; non-realistic uses the cartoon
+  // planet with the 3.4× display radius from planetDisplayRadius().
+  if (normName === 'hd 100546b' && !b.isComet) {
+    b.isSun = false;
+    b.mass = 1.576;                           // 1.6506 Jupiter masses
+    b.radius = 3 + Math.cbrt(b.mass) * 2.2;
+    b.color = '#deb47e';
+    b.trail = [];
+    delete b.continents;
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.stellarPhase;
+    delete b.phaseAtSim;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "ROXs 42Bb" → snap to a 10 M_jup gas giant. The realistic-mode
+  // renderer paints the banded reddish look with polar cap + cyclone storm;
+  // the non-realistic path keeps the cartoon planet with the 2.5× display
+  // radius from planetDisplayRadius().
+  if (normName === 'roxs 42bb' && !b.isComet) {
+    b.isSun = false;
+    b.mass = 9.55;                            // 10 Jupiter masses
+    b.radius = 3 + Math.cbrt(b.mass) * 2.2;
+    b.color = '#a85838';
+    b.trail = [];
+    delete b.continents;
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.stellarPhase;
+    delete b.phaseAtSim;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "J1407b" → snap to a 10 M_jup gas giant with the massive ring
+  // system. drawRealisticJ1407b paints the rings in realistic mode; the
+  // non-realistic path keeps the existing rings-via-drawJ1407bRings render.
+  if (normName === 'j1407b' && !b.isComet) {
+    b.isSun = false;
+    b.mass = 9.55;                            // 10 Jupiter masses
+    b.radius = 3 + Math.cbrt(b.mass) * 2.2;
+    b.color = '#caa987';
+    b.trail = [];
+    delete b.continents;
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.stellarPhase;
+    delete b.phaseAtSim;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  if (normName === '2mass j0523-1403' && !b.isComet) {
+    b.isSun = true;
+    b.mass = SMALL_STAR_MASS;
+    b.radius = SMALLSTAR_RADIUS;
+    b.color = SMALLSTAR_COLOR;
+    b.stellarPhase = 'main-sequence';
+    b.phaseAtSim = simTime;
+    b.createdAtSim = simTime;
+    b.trail = [];
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.continents;
+    triggerMergeFlash();
+    buildControls();
+    return;
+  }
+
+  // Rename to "Rigel" → snap to a 21 M☉ blue supergiant. updateRigelStars sets
+  // the visible radius to ~half Mercury's orbit every frame.
+  if (normName === 'rigel' && !b.isComet) {
+    b.isSun = true;
+    b.mass = RIGEL_MASS;
+    b.radius = 28 + Math.cbrt(b.mass / 1000) * 4;
+    b.color = RIGEL_COLOR;
+    b.stellarPhase = 'blue-super-giant';
+    b.phaseAtSim = simTime;
+    b.createdAtSim = simTime;
+    b.trail = [];
+    delete b.accretionRing;
+    delete b.redGiantAtSim;
+    delete b.redSuperGiant;
+    delete b.betelgeuseStartSim;
+    delete b.whiteDwarfAtSim;
+    delete b.nebulaResolved;
+    delete b.magnetar;
+    delete b.magnetarRolled;
+    delete b.neutronResolved;
+    delete b.strangeMatter;
+    delete b.wolfRayetDuration;
+    delete b.continents;
     triggerMergeFlash();
     buildControls();
     return;
@@ -7955,16 +9467,26 @@ function serializeUniverse() {
       // (Only rockets carry Sets, and we don't save rockets.)
       return copy;
     }),
+    galaxies: galaxies.map(g => Object.assign({}, g)),
     view:    { viewX, viewY, viewZoom, autoFollow },
-    timing:  { simTime, nextPlanetId, nextSunId },
-    toggles: { paused, showTrails, showVectors, starAfterlifeEnabled, speedMul }
+    timing:  { simTime, nextPlanetId, nextSunId, nextAsteroidId, nextCometId },
+    toggles: {
+      paused, showTrails, showVectors, starAfterlifeEnabled, speedMul,
+      sizeExaggeration, realisticMode, facesEnabled, asteroidTrailsEnabled,
+      is3D, cameraYaw, cameraPitch, aliensDisabled, bigRockets, bigNeutronStars
+    }
   };
 }
 
 function deserializeUniverse(s) {
   if (!s || !s.bodies) return false;
   bodies      = s.bodies.map(b => Object.assign({}, b, { trail: [] }));
+  // Always reset visual-only galaxies, even when the save predates galaxy
+  // persistence — otherwise the previous scene's galaxies linger over the
+  // newly loaded bodies with stale centerBodyIds that no longer resolve.
+  galaxies    = (s.galaxies || []).map(g => Object.assign({}, g));
   rockets     = [];
+  ufos        = [];
   mergeEffects = [];
   if (s.view) {
     viewX      = s.view.viewX;
@@ -7976,27 +9498,59 @@ function deserializeUniverse(s) {
     simTime       = s.timing.simTime || 0;
     nextPlanetId  = s.timing.nextPlanetId || 1;
     nextSunId     = s.timing.nextSunId || 1;
+    nextAsteroidId = s.timing.nextAsteroidId || 1;
+    nextCometId   = s.timing.nextCometId || 1;
   }
   if (s.toggles) {
-    paused                = !!s.toggles.paused;
-    showTrails            = s.toggles.showTrails !== false;
-    showVectors           = !!s.toggles.showVectors;
-    starAfterlifeEnabled  = s.toggles.starAfterlifeEnabled !== false;
-    speedMul              = s.toggles.speedMul || 1;
+    const tg = s.toggles;
+    paused                = !!tg.paused;
+    showTrails            = tg.showTrails !== false;
+    showVectors           = !!tg.showVectors;
+    starAfterlifeEnabled  = tg.starAfterlifeEnabled !== false;
+    speedMul              = tg.speedMul || 1;
+    sizeExaggeration      = tg.sizeExaggeration || 1;
+    realisticMode         = !!tg.realisticMode;
+    facesEnabled          = !!tg.facesEnabled;
+    asteroidTrailsEnabled = !!tg.asteroidTrailsEnabled;
+    is3D                  = !!tg.is3D;
+    cameraYaw             = tg.cameraYaw || 0;
+    cameraPitch           = tg.cameraPitch || 0;
+    aliensDisabled        = !!tg.aliensDisabled;
+    bigRockets            = !!tg.bigRockets;
+    bigNeutronStars       = !!tg.bigNeutronStars;
   }
   // Reset two-body selection — bodies in the new universe have different ids
   selectedBodyAId = null;
   selectedBodyBId = null;
+  // Reset camera-follow state — the targets it referenced no longer exist
+  lockTargetId = null;
+  followRocket = false;
+  watchAliens  = false;
   // Refresh UI to match
   buildControls();
+  const setActive = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', on);
+  };
   const pBtn = document.getElementById('btn-pause');
   if (pBtn) { pBtn.textContent = paused ? '▶ Play' : '⏸ Pause'; pBtn.classList.toggle('active', paused); }
-  const tBtn = document.getElementById('btn-trails');
-  if (tBtn) tBtn.classList.toggle('active', showTrails);
-  const vBtn = document.getElementById('btn-vectors');
-  if (vBtn) vBtn.classList.toggle('active', showVectors);
-  const aBtn = document.getElementById('btn-afterlife');
-  if (aBtn) aBtn.classList.toggle('active', starAfterlifeEnabled);
+  setActive('btn-trails', showTrails);
+  setActive('btn-vectors', showVectors);
+  setActive('btn-afterlife', starAfterlifeEnabled);
+  setActive('btn-realistic', realisticMode);
+  setActive('btn-faces', facesEnabled);
+  setActive('btn-asteroid-trails', asteroidTrailsEnabled);
+  setActive('btn-3d', is3D);
+  setActive('btn-follow-rocket', false);
+  setActive('btn-watch-aliens', false);
+  setActive('btn-disable-aliens', aliensDisabled);
+  setActive('btn-big-rockets', bigRockets);
+  setActive('btn-big-ns', bigNeutronStars);
+  syncCameraSliders();
+  const exEl = document.getElementById('size-exag-val');
+  if (exEl) exEl.textContent = fmtExagMul(sizeExaggeration);
+  const exSlider = document.getElementById('size-exag-slider');
+  if (exSlider) exSlider.value = String(Math.log10(Math.max(1, sizeExaggeration)));
   applySpeed(speedMul);
   return true;
 }
@@ -8387,7 +9941,10 @@ function adminSpawn(kind) {
       break;
     }
     case 'j1407b': {
-      const mass = 15;
+      // 10 Jupiter masses; real J1407b mass estimate is ~13–26 M☉ · 10⁻³, we
+      // use the lower bound. Sun = 1000 sim units and Sun:Jupiter = 1047, so
+      // 1 Jupiter mass ≈ 0.955 sim units → 10 M_jup ≈ 9.55.
+      const mass = 9.55;
       const r = 3 + Math.cbrt(mass) * 2.2;
       // Effective radius for overlap-checking includes the massive rings —
       // they extend out to ~28 × scale × b.radius. Otherwise the rings
@@ -8409,11 +9966,14 @@ function adminSpawn(kind) {
     case 'hd100546b': {
       const isRoxs = kind === 'roxs42bb';
       const displayName = isRoxs ? 'ROXs 42Bb' : 'HD 100546b';
-      const mass = 15;
+      // Real-world masses, with 1 Mjup ≈ 0.955 sim units (Sun:Jupiter = 1047):
+      //   ROXs 42Bb   ≈ 10     Mjup → 9.55  sim units
+      //   HD 100546b  ≈ 1.6506 Mjup → 1.576 sim units
+      const mass = isRoxs ? 9.55 : 1.576;
       const r = 3 + Math.cbrt(mass) * 2.2;
-      // Effective radius reflects the name-based size override so the
+      // Effective radius reflects the name-based display-size override so the
       // big planet doesn't spawn inside another body.
-      const effR = JUPITER_RADIUS * (isRoxs ? 2.5 : 7);
+      const effR = JUPITER_RADIUS * (isRoxs ? 2.5 : 3.4);
       const pos = pickAdminSpawnPos(effR);
       bodies.push({
         id: 'planet-' + nextPlanetId,
@@ -8421,7 +9981,7 @@ function adminSpawn(kind) {
         isSun: false,
         x: pos.x, y: pos.y, vx: 0, vy: 0,
         mass, radius: r,
-        color: isRoxs ? '#a87a52' : '#d4825a',
+        color: isRoxs ? '#a87a52' : '#deb47e',
         trail: [], velMul: 1
       });
       nextPlanetId++;
@@ -8440,11 +10000,10 @@ function adminSpawn(kind) {
       break;
     }
     case 'betelgeuse': {
-      const mass = 1000;
+      const mass = BETELGEUSE_MASS;
       const r = 28 + Math.cbrt(mass / 1000) * 4;
-      // Effective radius for overlap-checking uses the final visible size
-      // (b.radius × 35 from RSG rendering at full expansion).
-      const finalR = r * BETELGEUSE_MAX_MUL * 35;
+      // Overlap-check uses the final visible disc (≈ Jupiter's orbit).
+      const finalR = BETELGEUSE_TARGET_AU * _AU_SIM_UNITS;
       const pos = pickAdminSpawnPos(finalR);
       bodies.push({
         id: 'sun-' + nextSunId,
@@ -8464,10 +10023,10 @@ function adminSpawn(kind) {
       break;
     }
     case 'rigel': {
-      const mass = 1000;
+      const mass = RIGEL_MASS;
       const r = 28 + Math.cbrt(mass / 1000) * 4;
-      // Overlap-checking uses the final 80× Rigel radius.
-      const finalR = r * RIGEL_SIZE_MUL;
+      // Overlap-check uses the final visible disc (≈ half Mercury's orbit).
+      const finalR = RIGEL_TARGET_AU * _AU_SIM_UNITS;
       const pos = pickAdminSpawnPos(finalR);
       bodies.push({
         id: 'sun-' + nextSunId,
@@ -8484,17 +10043,15 @@ function adminSpawn(kind) {
       break;
     }
     case 'smallstar': {
-      const mass = 1000;
-      const r = 28 + Math.cbrt(mass / 1000) * 4;
-      const finalR = r * SMALLSTAR_SIZE_MUL;
-      const pos = pickAdminSpawnPos(finalR);
+      const mass = SMALL_STAR_MASS;
+      const pos = pickAdminSpawnPos(SMALLSTAR_RADIUS);
       bodies.push({
         id: 'sun-' + nextSunId,
         name: '2MASS J0523-1403',
         isSun: true,
         x: pos.x, y: pos.y, vx: 0, vy: 0,
-        mass, radius: r,
-        color: getStarColor(mass),
+        mass, radius: SMALLSTAR_RADIUS,
+        color: SMALLSTAR_COLOR,
         trail: [], velMul: 1,
         createdAtSim: simTime,
         stellarPhase: 'main-sequence'
@@ -8800,7 +10357,7 @@ function renderAdminSection() {
         <button class="btn add-btn" onclick="adminSpawn('halley')" title="Halley's Comet — 76-year orbital period, eccentricity 0.967. Semi-major axis is solved from the period via Kepler's third law against the current G and Sun mass.">☄ Halley's Comet</button>
       </div>
       <div class="btn-row">
-        <button class="btn add-btn" onclick="adminSpawn('ufo')" title="Spawn a wave of Martian flying saucers that fly from Mars to Earth and bombard it with laser beams. Needs both Mars and Earth in the scene. (There's also a random 10% chance per ~20s for an invasion on its own.)">🛸 Spawn UFO</button>
+        <button class="btn add-btn" onclick="adminSpawn('ufo')" title="Spawn a wave of friendly Martian saucers that fly from Mars to visit Earth (and sometimes the Moon), land briefly, then leave. Needs both Mars and Earth in the scene. (There's also a random 10% chance per ~20s for a visit on its own.)">🛸 Spawn UFO</button>
       </div>
       <div class="btn-row">
         <button class="btn add-btn" onclick="adminLineUpBodies()" title="Line up every body in the scene edge-to-edge, smallest → biggest. Velocities are zeroed and the simulation is paused so you can size-compare them; press Play to release the line back into gravity." style="grid-column:1/-1;background:rgba(125,211,252,0.12);border-color:rgba(125,211,252,0.3);color:#7dd3fc">📏 Line Up Bodies (smallest → biggest)</button>

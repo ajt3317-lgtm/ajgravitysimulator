@@ -139,7 +139,10 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
           <button class="btn" id="btn-recenter" onclick="recenterView()" title="Snap the camera back to follow the primary sun and reset zoom to 1×. Use this if you panned/zoomed and lost the scene.">⌖ Recenter</button>
           <button class="btn" id="btn-3d" onclick="toggleThreeD()" title="Toggle 3D mode. In 3D, bodies have a z-axis and the camera can be tilted/rotated with right-click drag (or Shift + drag). The default solar system orbits in the z=0 plane until you give bodies vertical motion.">🌐 3D</button>
           <button class="btn" id="btn-follow-rocket" onclick="toggleFollowRocket()" title="Follow a rocket with the camera, keeping it centred so you can watch its journey between planets. Rockets launch from Earth-like planets. Click again to release.">🚀 Follow Rocket</button>
-          <button class="btn" id="btn-watch-aliens" onclick="toggleWatchAliens()" title="Frame Earth and the attacking Martian saucers so you can watch them shoot at it. Summons a wave if none is active. Click again to release.">🛸 Watch Aliens</button>
+          <button class="btn" id="btn-watch-aliens" onclick="toggleWatchAliens()" title="Follow the friendly Martian saucers as they fly in from Mars to visit Earth (or the Moon), land briefly, and leave. Summons a wave if none is active. Click again to release.">🛸 Watch Aliens</button>
+          <button class="btn" id="btn-disable-aliens" onclick="toggleDisableAliens()" title="Turn off Martian visits entirely: no periodic spawns, and any active wave is cleared. Click again to re-enable.">⛔ Disable Aliens</button>
+          <button class="btn" id="btn-big-rockets" onclick="toggleBigRockets()" title="Render rockets at Earth scale instead of their realistic microscopic size, so you can see them without zooming way in. Physics unchanged.">🚀 Big Rockets</button>
+          <button class="btn" id="btn-big-ns" onclick="toggleBigNeutronStars()" title="Render realistic-mode neutron stars at half Earth's radius instead of their real ~Houston-sized scale (Earth/300), so you can see them without zooming way in. Physics unchanged.">💫 Big NS</button>
         </div>
         <div class="slider-group">
           <div class="slider-label"><span>Speed</span><span class="slider-value" id="speed-val">1.00×</span></div>
